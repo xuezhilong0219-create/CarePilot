@@ -363,7 +363,8 @@ def _retrieval_items() -> list[EvalItem]:
                 category="other",
                 answerable=False,
                 gold_doc_ids=["sample_erp_faq"] if title_key else [],
-                gold_title_keys=[title_key] if title_key else [],
+                # 示例知识库没有 manifest：整个文件是一篇文档，title_key 就是文件名，而不是小节标题
+                gold_title_keys=["sample_erp_faq"] if title_key else [],
                 platform_name=platform,
             )
         )
