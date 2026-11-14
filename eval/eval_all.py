@@ -37,7 +37,7 @@ GROUPS = ("可答", "需查数据", "无关", "含糊")
 QUICK_N = 60
 QUICK_SEED = 42
 DEFAULT_DATASET = ROOT / "eval" / "real" / "dataset_full.jsonl"
-DEFAULT_TOOL_DATASET = ROOT / "eval" / "real" / "tool_dataset.jsonl"
+DEFAULT_TOOL_DATASET = ROOT / "eval" / "real" / "dataset_tools.jsonl"
 DEFAULT_REPORT_DIR = ROOT / "eval" / "real" / "reports"
 
 StepFn = Callable[[dict[str, Any]], dict[str, Any]]
