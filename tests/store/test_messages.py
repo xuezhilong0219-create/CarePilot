@@ -16,6 +16,7 @@ def test_draft_must_be_internal(store: TicketStore, c1: Principal, a1: Principal
 
 def test_idem_key_deduplicates_message(store: TicketStore, c1: Principal, a1: Principal):
     ticket = make_ticket(store, c1)
+    store.claim(a1, ticket.ticket_id)  # 坐席要先认领，才能向客户发公开消息
     first = store.add_message(
         ticket.ticket_id, author=a1, kind="message", body="已处理", idem_key="run-1:send"
     )
@@ -29,6 +30,7 @@ def test_idem_key_deduplicates_message(store: TicketStore, c1: Principal, a1: Pr
 
 def test_different_idem_keys_create_two_messages(store: TicketStore, c1: Principal, a1: Principal):
     ticket = make_ticket(store, c1)
+    store.claim(a1, ticket.ticket_id)
     store.add_message(ticket.ticket_id, author=a1, kind="message", body="a", idem_key="k1")
     store.add_message(ticket.ticket_id, author=a1, kind="message", body="b", idem_key="k2")
     assert len(store.list_messages(a1, ticket.ticket_id)) == 2
@@ -53,3 +55,26 @@ def test_events_hidden_from_other_customer(store: TicketStore, c1: Principal, c2
     ticket = make_ticket(store, c2, shop_id="S3")
     with pytest.raises(Forbidden):
         store.events(c1, ticket.ticket_id)
+
+
+def test_non_owner_agent_cannot_post_public_message_but_can_write_internal_note(
+    store: TicketStore, c1: Principal, a1: Principal, a2: Principal, admin: Principal
+):
+    # 回归：worker S 原先允许任何坐席在别人负责的工单里发客户可见的消息，等于改别人的工单（C1）
+    ticket = make_ticket(store, c1)
+    store.claim(a1, ticket.ticket_id)
+    with pytest.raises(Forbidden):
+        store.add_message(ticket.ticket_id, author=a2, kind="message", body="我来回复")
+    store.add_message(ticket.ticket_id, author=a2, kind="note", body="同事备注", visibility="internal")
+    store.add_message(ticket.ticket_id, author=admin, kind="message", body="管理员代回复")
+    store.add_message(ticket.ticket_id, author=a1, kind="message", body="负责人回复")
+    public = [m.body for m in store.list_messages(c1, ticket.ticket_id)]
+    assert public == ["管理员代回复", "负责人回复"]
+
+
+def test_unclaimed_ticket_agent_must_claim_before_public_message(store: TicketStore, c1: Principal, a1: Principal):
+    ticket = make_ticket(store, c1)
+    with pytest.raises(Forbidden):
+        store.add_message(ticket.ticket_id, author=a1, kind="message", body="未认领就回复")
+    store.claim(a1, ticket.ticket_id)
+    store.add_message(ticket.ticket_id, author=a1, kind="message", body="认领后回复")

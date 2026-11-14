@@ -289,6 +289,10 @@ class TicketStore:
                 raise Forbidden(f"无权在工单 {ticket_id} 上留言")
             if not is_staff(author) and (kind != "message" or visibility != "public"):
                 raise Forbidden("客户只能发公开消息")
+            # 客户可见的消息等于"替这张工单对外说话"，属于修改：坐席必须是负责人（或管理员）。
+            # 内部备注/草稿是同事间协作，任何能看到工单的坐席都可以写。
+            if is_staff(author) and visibility == "public" and not can_modify(author, ticket):
+                raise Forbidden(f"无权以坐席身份向客户发布 {ticket_id} 的公开消息（需先认领，或由负责人发布）")
             if idem_key is not None:
                 existing = conn.execute(
                     "SELECT * FROM ticket_messages WHERE idem_key=?", (idem_key,)

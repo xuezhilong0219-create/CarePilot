@@ -77,6 +77,7 @@ def test_admin_can_modify_any_ticket(store: TicketStore, c1: Principal, a1: Prin
 
 def test_internal_messages_hidden_from_customer(store: TicketStore, c1: Principal, a1: Principal):
     ticket = make_ticket(store, c1)
+    store.claim(a1, ticket.ticket_id)
     store.add_message(ticket.ticket_id, author=c1, kind="message", body="客户问题")
     store.add_message(ticket.ticket_id, author=a1, kind="note", body="内部备注", visibility="internal")
     store.add_message(ticket.ticket_id, author=a1, kind="message", body="对外回复")
