@@ -48,18 +48,22 @@ def _build_retriever(args: argparse.Namespace):
 
 
 def _print_summary(summary: dict[str, Any]) -> None:
-    rows = [
-        ["hit@k (strict)", summary["hit@k_strict"]],
-        ["hit@k (lenient)", summary["hit@k_lenient"]],
+    cutoffs = sorted({int(k.split("@")[1].split("_")[0]) for k in summary if k.startswith("hit@") and k[4].isdigit()})
+    rows = []
+    for mode in ("strict", "lenient"):
+        rows.append([f"hit@N ({mode})", *[summary.get(f"hit@{n}_{mode}", "-") for n in cutoffs]])
+    chunk = sorted({int(k.split("@")[1].split("_")[0]) for k in summary if k.startswith("chunk_hit@")})
+    print(markdown_table(["metric", *[f"N={n} 篇" for n in cutoffs]], rows))
+    print()
+    rows = [[f"chunk_hit@{n} ({mode})", summary.get(f"chunk_hit@{n}_{mode}", "-")] for n in chunk for mode in ("strict", "lenient")]
+    rows += [
         ["MRR (strict)", summary["mrr_strict"]],
         ["MRR (lenient)", summary["mrr_lenient"]],
-        ["recall@k (strict)", summary["recall@k_strict"]],
-        ["recall@k (lenient)", summary["recall@k_lenient"]],
         ["latency p50 (ms)", summary["latency_ms_p50"]],
         ["latency p90 (ms)", summary["latency_ms_p90"]],
         ["samples", summary["n"]],
     ]
-    print(markdown_table(["metric", f"@{summary['k']}"], rows))
+    print(markdown_table(["metric", "value"], rows))
 
 
 def main(argv: list[str] | None = None) -> int:

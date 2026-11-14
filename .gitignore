@@ -13,3 +13,6 @@ data/index/
 eval/real/
 .worktrees/
 data/models/
+jieba.cache
+pytest-cache-files-*/
+.pytest-probe-*/

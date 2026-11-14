@@ -412,3 +412,13 @@ def test_cli_missing_manifest_has_clear_error(work_tmp, capsys):
     err = capsys.readouterr().err
     assert code == 2
     assert "manifest.jsonl" in err
+
+
+def test_shares_window_equivalent_to_lcs():
+    from carepilot.evaluation.gen_core import longest_common_substring_length as lcs
+    from carepilot.evaluation.gen_core import shares_window
+
+    body = "进入设置店铺管理选中对应店铺点击重新授权"
+    for text in ["点击重新授权后", "店铺管理选中对应店铺", "完全无关的一句话呀呀呀呀呀", "选中对应店铺点击重新授权！", "短"]:
+        for window in (5, 8, 12):
+            assert shares_window(text, body, window) == (lcs(text, body) >= window)

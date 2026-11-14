@@ -16,6 +16,7 @@ from ..tools import TicketSystem
 from .metrics import (
     aggregate_retrieval,
     percentile,
+    hit_curve,
     reply_metrics,
     retrieval_metrics,
     triage_metrics,
@@ -62,6 +63,7 @@ def run_retrieval(
         hits = retriever.search(query, k=k)
         latency_ms = (time.perf_counter() - started) * 1000
         metrics = retrieval_metrics(hits, item.gold_doc_ids, item.gold_title_keys, k, latency_ms)
+        metrics["curve"] = hit_curve(hits, item.gold_doc_ids, item.gold_title_keys)
         records.append(
             {
                 "qid": item.qid,

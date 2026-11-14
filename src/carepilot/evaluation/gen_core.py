@@ -326,6 +326,12 @@ def longest_common_substring_length(a: str, b: str) -> int:
     return best
 
 
+def shares_window(text: str, body: str, window: int) -> bool:
+    """等价于 longest_common_substring_length(text, body) >= window，但用 C 级的 `in` 查找，
+    对上万字的文档也是毫秒级（DP 版本要秒级）。"""
+    return any(text[i : i + window] in body for i in range(len(text) - window + 1))
+
+
 def check_answerable(
     question: str,
     doc_text: str,
@@ -340,7 +346,7 @@ def check_answerable(
     if error and error not in question:
         return REJECT_ERROR_TEXT
     body = doc_text.replace(error, "") if error else doc_text
-    if longest_common_substring_length(_squash(text), _squash(body)) >= COPY_WINDOW:
+    if shares_window(_squash(text), _squash(body), COPY_WINDOW):
         return REJECT_COPY
     if text in set(existing):
         return REJECT_DUP

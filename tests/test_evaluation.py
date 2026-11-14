@@ -425,3 +425,31 @@ def test_run_retrieval_script_end_to_end_with_fake_factory(tmp_path: Path, monke
     reports = list(tmp_path.glob("*_unit.json"))
     assert len(reports) == 1
     assert load_report(reports[0])["n_items"] == 5
+
+
+def test_error_text_rejects_whole_message_as_prediction():
+    # 回归：只看覆盖率时，把整条客户消息当报错原文返回也会满分
+    message = "库存同步到京东一直失败，日志里提示请求过于频繁，麻烦看下"
+    assert m.error_text_match("请求过于频繁", "请求过于频繁", message)
+    assert not m.error_text_match(message, "请求过于频繁", message)
+
+
+def _hit(doc_id: str, title_key: str, i: int = 0) -> Hit:
+    return Hit(Chunk(id=f"{doc_id}#{i}", title="t", text="x", doc_id=doc_id, meta={"title_key": title_key}), 1.0)
+
+
+def test_hit_curve_hand_computed():
+    # chunk 顺序：a#0, a#1, b#0, c#0；折叠成文档后是 [a, b, c]
+    hits = [_hit("a", "ka", 0), _hit("a", "ka", 1), _hit("b", "kb"), _hit("c", "kc")]
+    curve = m.hit_curve(hits, ["c"], ["kb"])
+    assert curve["hit@1_strict"] == 0 and curve["hit@3_strict"] == 1  # c 是文档排名第 3
+    assert curve["hit@1_lenient"] == 0 and curve["hit@3_lenient"] == 1  # kb 是第 2
+    assert curve["hit@5_strict"] == 1 and curve["hit@10_strict"] == 1
+    # 前 4 个 chunk 里包含 c#0，所以 chunk_hit@4 命中；前 3 个 chunk 则不会
+    assert curve["chunk_hit@4_strict"] == 1
+    assert m.hit_curve(hits[:3], ["c"], [], chunk_cutoffs=(4,))["chunk_hit@4_strict"] == 0
+
+
+def test_aggregate_retrieval_averages_curve():
+    rows = [{"curve": {"hit@1_strict": 1.0}}, {"curve": {"hit@1_strict": 0.0}}]
+    assert m.aggregate_retrieval(rows)["hit@1_strict"] == 0.5

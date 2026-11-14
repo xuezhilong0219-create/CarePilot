@@ -106,11 +106,41 @@ def retrieval_metrics(
     return out
 
 
+CUTOFFS = (1, 3, 5, 10)
+CHUNK_CUTOFFS = (4,)  # 回复节点实际只拿到前 4 个 chunk（settings.retrieval_top_k），这个数直接决定能不能答对
+
+
+def hit_curve(
+    hits: Sequence[Hit],
+    gold_doc_ids: Iterable[str],
+    gold_title_keys: Iterable[str],
+    cutoffs: Sequence[int] = CUTOFFS,
+    chunk_cutoffs: Sequence[int] = CHUNK_CUTOFFS,
+) -> dict[str, float]:
+    """一次检索算出一整条命中率曲线，不用为每个 k 重跑检索。
+    hit@N 的 N 是折叠后的"文档数"；chunk_hit@N 的 N 是原始 chunk 数（折叠前）。
+    检索器只取回 k 个 chunk，折叠后文档数可能不足 N，所以 N 大于 k 时的数字不会再增长。"""
+    doc_gold, title_gold = list(gold_doc_ids), list(gold_title_keys)
+    strict, lenient = fold_ranking(hits, STRICT), fold_ranking(hits, LENIENT)
+    out: dict[str, float] = {}
+    for n in cutoffs:
+        out[f"hit@{n}_strict"] = hit_at_k(strict, doc_gold, n)
+        out[f"hit@{n}_lenient"] = hit_at_k(lenient, title_gold, n)
+    for n in chunk_cutoffs:
+        head = list(hits)[:n]
+        out[f"chunk_hit@{n}_strict"] = hit_at_k(fold_ranking(head, STRICT), doc_gold, n)
+        out[f"chunk_hit@{n}_lenient"] = hit_at_k(fold_ranking(head, LENIENT), title_gold, n)
+    return out
+
+
 def aggregate_retrieval(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     keys = ("hit@k_strict", "hit@k_lenient", "mrr_strict", "mrr_lenient", "recall@k_strict", "recall@k_lenient")
     out: dict[str, Any] = {"n": len(rows)}
     for key in keys:
         out[key] = _mean([float(r[key]) for r in rows if key in r])
+    curve_keys = sorted({key for r in rows for key in r.get("curve", {})})
+    for key in curve_keys:
+        out[key] = _mean([float(r["curve"][key]) for r in rows if key in r.get("curve", {})])
     latencies = [float(r["latency_ms"]) for r in rows if "latency_ms" in r]
     out["latency_ms_mean"] = _mean(latencies)
     out["latency_ms_p50"] = percentile(latencies, 50)
@@ -142,9 +172,11 @@ def overlap_ratio(predicted: str, expected: str) -> float:
 
 def error_text_match(predicted: str | None, expected: str | None, message: str) -> bool:
     pred, gold, msg = normalize_entity(predicted), normalize_entity(expected), normalize_entity(message)
-    if not pred or not gold:
+    if not pred or not gold or pred not in msg:
         return False
-    return pred in msg and overlap_ratio(pred, gold) >= 0.8
+    common = sum((Counter(pred) & Counter(gold)).values())
+    # 只看覆盖率会让"把整条消息当报错原文"也得满分，所以加一条精确度：预测里至少一半是对的
+    return common / len(gold) >= 0.8 and common / len(pred) >= 0.5
 
 
 def triage_metrics(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
