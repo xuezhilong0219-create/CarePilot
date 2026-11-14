@@ -37,6 +37,7 @@ RETRY_TEMPERATURES = (0.0, 0.5, 1.0)
 REJECT_LENGTH = "长度不在 12~100"
 REJECT_COPY = "与原文连续相同 >= 12 字"
 REJECT_ERROR_TEXT = "error_text 未在问题里逐字出现"
+REJECT_ERROR_MISMATCH = "error_text 与给定的报错串不一致"
 REJECT_DUP = "与已有问题重复"
 REJECT_LLM = "LLM 调用失败"
 REJECT_DOC = "文档读取失败"
@@ -226,12 +227,100 @@ def plan_samples(entries: Sequence[ManifestEntry], n: int, seed: int) -> SampleP
     return SamplePlan(quotas=quotas, selected=selected, backups=backups)
 
 
+@dataclass
+class ErrorSamplePlan:
+    quotas: dict[str, int]
+    selected: list[tuple[ManifestEntry, str]]
+
+
+def plan_error_samples(
+    entries: Sequence[ManifestEntry],
+    kb_dir: Path,
+    n: int,
+    seed: int,
+    exclude_doc_ids: Iterable[str] = (),
+) -> ErrorSamplePlan:
+    """抽「带报错原文」的文档：同一套候选过滤与 sqrt 分层，再排除已被可答样本选中的文档。"""
+    if n < 0:
+        raise ValueError("名额不能为负数")
+    if n == 0:
+        return ErrorSamplePlan(quotas={}, selected=[])
+    excluded = set(exclude_doc_ids)
+    pool: dict[str, list[tuple[ManifestEntry, list[str]]]] = {}
+    for entry in candidate_docs(entries):
+        if entry.doc_id in excluded:
+            continue
+        try:
+            text = read_doc(kb_dir, entry)
+        except OSError:
+            continue
+        errors = extract_error_candidates(text)
+        if errors:
+            pool.setdefault(entry.top_dir, []).append((entry, errors))
+
+    counts = {top_dir: len(docs) for top_dir, docs in pool.items()}
+    quotas = allocate_quotas(counts, n)
+    selected: list[tuple[ManifestEntry, str]] = []
+    for top_dir in sorted(pool):
+        docs = sorted(pool[top_dir], key=lambda pair: pair[0].doc_id)
+        random.Random(f"{seed}:error:{top_dir}").shuffle(docs)
+        for entry, errors in docs[: quotas[top_dir]]:
+            error = random.Random(f"{seed}:error:{entry.doc_id}").choice(errors)
+            selected.append((entry, error))
+    return ErrorSamplePlan(quotas=quotas, selected=selected)
+
+
 def doc_path(kb_dir: Path, entry: ManifestEntry) -> Path:
     return Path(kb_dir) / "docs" / f"{entry.doc_id}.md"
 
 
 def read_doc(kb_dir: Path, entry: ManifestEntry) -> str:
     return doc_path(kb_dir, entry).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 报错原文抽取
+
+_QUOTED_ERROR_RE = re.compile(r'[“"]([^“”"\n]{6,80})[”"]')
+_CODE_ERROR_RE = re.compile(r"[A-Za-z0-9_.#:\[\]-]{12,}")
+_ERROR_CONTEXT_RE = re.compile(r"报错|提示|失败|异常|错误|返回")
+_ERROR_WORD_RE = re.compile(r"error|fail|invalid|exception|code", re.IGNORECASE)
+
+
+def _meaningful_error(text: str) -> bool:
+    if not text or "\n" in text or "\r" in text:
+        return False
+    if text.isdigit():  # 纯数字（含全角）不是报错原文
+        return False
+    return any(ch.isalnum() for ch in text)  # 纯标点也排除
+
+
+def extract_error_candidates(doc_text: str) -> list[str]:
+    """抽出像报错提示的原文串，结果保证是文档的逐字子串，按出现顺序去重。"""
+    found: list[tuple[int, str]] = []
+    for match in _QUOTED_ERROR_RE.finditer(doc_text):
+        inner = match.group(1).strip()
+        if not (6 <= len(inner) <= 80):
+            continue
+        prefix = doc_text[max(0, match.start() - 30) : match.start()]
+        if not _ERROR_CONTEXT_RE.search(prefix):
+            continue
+        if _meaningful_error(inner):
+            found.append((match.start(), inner))
+    for match in _CODE_ERROR_RE.finditer(doc_text):
+        token = match.group(0)
+        if not _ERROR_WORD_RE.search(token):
+            continue
+        if _meaningful_error(token):
+            found.append((match.start(), token))
+
+    found.sort(key=lambda pair: pair[0])
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, text in found:
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
 
 
 # ---------------------------------------------------------------- 生成模型
@@ -272,6 +361,30 @@ def build_answerable_prompt(entry: ManifestEntry, doc_text: str) -> str:
 2. 只问一个具体问题，而且仅凭下面的文档就能回答。
 3. 不能照抄文档标题；不能照抄文档里的完整句子。与原文连续相同达到 12 个字符就会被判为照抄。
 4. 如果文档里有典型报错提示，可以把报错原文逐字贴进消息；此时 error_text 必须填这句原文，并保证它逐字出现在 question 里。
+5. severity 按影响选择：critical=无法发货/订单下不来/登录不了等业务中断；high=主要功能不可用；medium=局部功能异常；low=咨询。
+6. platform_name / feature_name / partner_name 只能填消息里逐字出现的原文，没提到就填 null。
+7. 消息里不要出现“文档”“资料”“知识库”这些词。
+
+【文档标题】
+{entry.title}
+
+【文档正文（只给前 {PROMPT_DOC_CHARS} 字）】
+{body}
+"""
+
+
+def build_error_prompt(entry: ManifestEntry, doc_text: str, error_text: str) -> str:
+    body = doc_text[:PROMPT_DOC_CHARS]
+    return f"""请扮演一位使用旺店通 ERP 的商家，给售后客服写一条报障消息。
+
+这位商家在操作时遇到了下面这条报错，请把报错原文逐字贴进消息里：
+{error_text}
+
+要求：
+1. 必须把上面这句报错原文一个字不改地贴进消息里；error_text 字段填同一句原文，不要改写、不要删减。
+2. 再用一两句口语描述当时在做什么、看到什么现象。
+3. 整条消息 20 到 100 个字（按汉字个数算），像真实商家在聊天窗口里打的字。
+4. 不要照抄文档里的其他句子，尤其不要大段复制解决方案；与原文连续相同达到 12 个字符会被判为照抄。
 5. severity 按影响选择：critical=无法发货/订单下不来/登录不了等业务中断；high=主要功能不可用；medium=局部功能异常；low=咨询。
 6. platform_name / feature_name / partner_name 只能填消息里逐字出现的原文，没提到就填 null。
 7. 消息里不要出现“文档”“资料”“知识库”这些词。
@@ -525,6 +638,81 @@ def run_answerables(
     return accepted[:n], stats
 
 
+def attempt_error(
+    entry: ManifestEntry,
+    doc_text: str,
+    error_text: str,
+    generator: CachedGenerator,
+    model: str,
+    seen: set[str],
+    lock: threading.Lock,
+) -> DocAttempt:
+    """报错样本：除了沿用 check_answerable，还强制 error_text 与给定的报错串完全一致。"""
+    rejections: list[str] = []
+    for temperature in RETRY_TEMPERATURES:
+        try:
+            ticket = generator.generate(
+                GeneratedTicket,
+                model,
+                temperature,
+                SYSTEM_ANSWERABLE,
+                build_error_prompt(entry, doc_text, error_text),
+            )
+        except Exception as exc:  # 单篇失败不该拖垮整批
+            rejections.append(f"{REJECT_LLM}: {type(exc).__name__}")
+            continue
+        assert isinstance(ticket, GeneratedTicket)
+        if (ticket.error_text or "").strip() != error_text:
+            rejections.append(REJECT_ERROR_MISMATCH)
+            continue
+        reason = check_answerable(ticket.question, doc_text, error_text, seen)
+        if reason is None:
+            question = ticket.question.strip()
+            with lock:
+                if question in seen:
+                    reason = REJECT_DUP
+                else:
+                    seen.add(question)
+                    fixed = sanitize_ticket(ticket).model_copy(
+                        update={"error_text": error_text}
+                    )
+                    return DocAttempt(entry, fixed, rejections)
+        rejections.append(reason)
+    return DocAttempt(entry, None, rejections)
+
+
+def run_errors(
+    plan: ErrorSamplePlan,
+    kb_dir: Path,
+    generator: CachedGenerator,
+    model: str,
+    workers: int = 1,
+) -> tuple[list[DocAttempt], Counter]:
+    """每篇文档只出一条报错样本；拒收就跳过，不用备选文档补位。"""
+    seen: set[str] = set()
+    lock = threading.Lock()
+    stats: Counter = Counter()
+
+    def work(pair: tuple[ManifestEntry, str]) -> DocAttempt:
+        entry, error_text = pair
+        try:
+            text = read_doc(kb_dir, entry)
+        except OSError as exc:
+            return DocAttempt(entry, None, [f"{REJECT_DOC}: {type(exc).__name__}"])
+        return attempt_error(entry, text, error_text, generator, model, seen, lock)
+
+    if not plan.selected:
+        return [], stats
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(plan.selected))) as pool:
+            attempts = list(pool.map(work, plan.selected))
+    else:
+        attempts = [work(pair) for pair in plan.selected]
+    for attempt in attempts:
+        stats.update(attempt.rejections)
+    return attempts, stats
+
+
 def run_unanswerables(
     generator: CachedGenerator, model: str, n: int, workers: int = 1
 ) -> list[tuple[Category, str]]:
@@ -576,6 +764,7 @@ def run_unanswerables(
 def assemble_dataset(
     answerables: Sequence[tuple[ManifestEntry, GeneratedTicket]],
     unanswerables: Sequence[tuple[Category, str]],
+    error_samples: Sequence[tuple[ManifestEntry, GeneratedTicket]] = (),
 ) -> list[EvalItem]:
     items: list[EvalItem] = []
     for entry, ticket in answerables:
@@ -608,29 +797,73 @@ def assemble_dataset(
                 source="generated",
             )
         )
+    for entry, ticket in error_samples:
+        items.append(
+            EvalItem(
+                qid=f"q{len(items) + 1:04d}",
+                question=ticket.question.strip(),
+                category=category_for(entry.top_dir, entry.title),
+                answerable=True,
+                gold_doc_ids=[entry.doc_id],
+                gold_title_keys=[entry.title_key],
+                severity=ticket.severity,
+                platform_name=ticket.platform_name,
+                feature_name=ticket.feature_name,
+                partner_name=ticket.partner_name,
+                error_text=ticket.error_text,
+                source="generated",
+            )
+        )
     return items
+
+
+def _append_review_item(lines: list[str], item: EvalItem, kb_dir: Path) -> None:
+    lines.append(f"## {item.qid}")
+    lines.append(f"- 问题：{item.question}")
+    if item.error_text:
+        lines.append(f"- 报错原文：{item.error_text}")
+    if item.gold_doc_ids:
+        doc_id = item.gold_doc_ids[0]
+        relative = f"docs/{doc_id}.md"
+        try:
+            text = (Path(kb_dir) / relative).read_text(encoding="utf-8")
+        except OSError:
+            text = "（读取文档失败）"
+        preview = " ".join(text.split())[:200]
+        lines.append(f"- 标准答案文档：{relative}")
+        lines.append(f"- 文档开头：{preview}")
+    else:
+        lines.append("- 标准答案文档：无（期望拒答）")
+    lines.append("")
 
 
 def write_review(
     path: Path, items: Sequence[EvalItem], kb_dir: Path, seed: int, n: int = 25
 ) -> None:
-    picked = random.Random(seed).sample(items, min(n, len(items)))
-    lines = ["# 评估集人工抽查", "", f"共 {len(items)} 条，随机抽 {len(picked)} 条。", ""]
-    for item in picked:
-        lines.append(f"## {item.qid}")
-        lines.append(f"- 问题：{item.question}")
-        if item.gold_doc_ids:
-            doc_id = item.gold_doc_ids[0]
-            relative = f"docs/{doc_id}.md"
-            try:
-                text = (Path(kb_dir) / relative).read_text(encoding="utf-8")
-            except OSError:
-                text = "（读取文档失败）"
-            preview = " ".join(text.split())[:200]
-            lines.append(f"- 标准答案文档：{relative}")
-            lines.append(f"- 文档开头：{preview}")
-        else:
-            lines.append("- 标准答案文档：无（期望拒答）")
-        lines.append("")
+    error_items = [it for it in items if it.error_text]
+    if not error_items:
+        # n_error=0 时保持原有格式和抽样方式不变
+        picked = random.Random(seed).sample(items, min(n, len(items)))
+        lines = ["# 评估集人工抽查", "", f"共 {len(items)} 条，随机抽 {len(picked)} 条。", ""]
+        for item in picked:
+            _append_review_item(lines, item, kb_dir)
+    else:
+        normal = [it for it in items if not it.error_text]
+        picked = random.Random(seed).sample(normal, min(n, len(normal)))
+        errors = random.Random(f"{seed}:error").sample(error_items, min(10, len(error_items)))
+        lines = [
+            "# 评估集人工抽查",
+            "",
+            f"共 {len(items)} 条（其中报错原文样本 {len(error_items)} 条），"
+            f"可答/不可答抽 {len(picked)} 条，报错样本抽 {len(errors)} 条。",
+            "",
+            "## 可答 / 不可答样本",
+            "",
+        ]
+        for item in picked:
+            _append_review_item(lines, item, kb_dir)
+        lines.extend(["## 报错原文样本", ""])
+        for item in errors:
+            _append_review_item(lines, item, kb_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")

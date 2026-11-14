@@ -437,3 +437,232 @@ def test_allocate_quotas_on_real_kb_distribution():
         assert all(q[d] <= counts[d] for d in counts)
         assert max(q.values()) <= int(0.35 * n)
         assert sum(q[d] for d in SPECIAL_DIRS) <= int(0.15 * n)
+
+
+# ---------------------------------------------------------------- 报错原文样本
+
+
+ERROR_DOC = """# 库存同步常见报错及解决方案
+
+库存同步失败提示“商品服务调用失败 #isv.item-quantity-item-update-service-error”，先检查店铺授权。
+授权过期时接口返回“oauth-error-code[30111]description[access token invalid]”，重新授权即可。
+另外提示“123456”这种纯数字不算报错。
+
+下面是另一段与前面内容无关的普通描述，用来把两段之间的距离拉开足够远：“随便一句没有关键词的话”放在这里当反例。
+"""
+
+
+def test_extract_error_candidates_real_examples():
+    found = core.extract_error_candidates(ERROR_DOC)
+    assert "商品服务调用失败 #isv.item-quantity-item-update-service-error" in found
+    assert "oauth-error-code[30111]description[access token invalid]" in found
+    # 所有候选都必须是原文的逐字子串
+    for text in found:
+        assert text in ERROR_DOC
+    # 纯数字、没有关键词的引号串不入选
+    assert "123456" not in found
+    assert "随便一句没有关键词的话" not in found
+    # 去重且保持出现顺序
+    assert found == list(dict.fromkeys(found))
+    assert found.index("商品服务调用失败 #isv.item-quantity-item-update-service-error") < found.index(
+        "oauth-error-code[30111]description[access token invalid]"
+    )
+
+
+def test_extract_error_candidates_code_form_and_dedupe():
+    doc = "接口返回 isv.item-quantity-item-update-service-error，请重试。"
+    assert core.extract_error_candidates(doc) == [
+        "isv.item-quantity-item-update-service-error"
+    ]
+    # 不含 error/fail/invalid/exception/code 的长串、纯数字都不算
+    assert core.extract_error_candidates("编号 123456789012345 和 abcdefghijklmn 都不算") == []
+    assert core.extract_error_candidates("提示“1234567890”") == []
+
+
+def _error_kb(work_tmp: Path, with_plain: bool = True) -> Path:
+    specs = []
+    for top_dir in ["A", "B", "C"]:
+        for i in range(5):
+            text = (
+                f"# {top_dir}文档{i}\n\n"
+                f"操作时提示“{top_dir}文档{i}的库存数量同步失败，商品更新接口异常”，请检查授权后重试。\n\n"
+                "更多说明：接口可能返回“授权令牌已失效，请重新授权”。\n"
+            )
+            specs.append(
+                {
+                    "doc_id": f"{top_dir}/d{i}",
+                    "top_dir": top_dir,
+                    "title": f"{top_dir}文档{i}",
+                    "chars": 1000,
+                    "text": text,
+                }
+            )
+    if with_plain:
+        specs.append(
+            {
+                "doc_id": "A/plain",
+                "top_dir": "A",
+                "title": "A普通文档",
+                "chars": 1000,
+                "text": "# 普通文档\n\n这里没有任何报错原文，只有操作步骤说明。",
+            }
+        )
+    return build_kb(work_tmp, specs)
+
+
+def test_plan_error_samples_excludes_selected_reproducible_and_skips_plain_docs(work_tmp):
+    kb = _error_kb(work_tmp)
+    entries = core.load_manifest(kb)
+
+    answerable = core.plan_samples(entries, 3, seed=1)
+    selected_ids = {e.doc_id for e in answerable.selected}
+
+    first = core.plan_error_samples(entries, kb, 6, seed=7, exclude_doc_ids=selected_ids)
+    second = core.plan_error_samples(entries, kb, 6, seed=7, exclude_doc_ids=selected_ids)
+
+    assert len(first.selected) == 6
+    assert [e.doc_id for e, _ in first.selected] == [e.doc_id for e, _ in second.selected]
+    assert [err for _, err in first.selected] == [err for _, err in second.selected]
+    # 已被可答样本选中的文档不能重复入选
+    assert not selected_ids & {e.doc_id for e, _ in first.selected}
+    # 没有报错串的文档不会入选，每条报错串都逐字来自对应文档
+    assert "A/plain" not in {e.doc_id for e, _ in first.selected}
+    for entry, error in first.selected:
+        assert error in core.read_doc(kb, entry)
+
+
+def test_plan_error_samples_zero_is_empty_and_does_not_read(work_tmp):
+    plan = core.plan_error_samples([], work_tmp / "missing", 0, seed=1)
+    assert plan.selected == [] and plan.quotas == {}
+
+
+def test_error_sample_rejects_rewritten_error_text(work_tmp):
+    kb = _error_kb(work_tmp)
+    entries = {e.doc_id: e for e in core.load_manifest(kb)}
+    entry = entries["A/d0"]
+    error = core.extract_error_candidates(core.read_doc(kb, entry))[0]
+
+    def responses(prompt, call):
+        return core.GeneratedTicket(
+            question=f"库存同步时提示 {error} 报错，麻烦看下怎么处理",
+            severity="high",
+            error_text="error-code 改写版",
+        )
+
+    generator = core.CachedGenerator(work_tmp / "cache", FakeLLM(responses))
+    plan = core.ErrorSamplePlan(quotas={}, selected=[(entry, error)])
+    attempts, stats = core.run_errors(plan, kb, generator, "fake-model", workers=1)
+
+    assert attempts[0].ticket is None
+    assert stats[core.REJECT_ERROR_MISMATCH] == len(core.RETRY_TEMPERATURES)
+
+
+def test_error_sample_accepts_exact_text_and_assembles_after_unanswerables(work_tmp):
+    kb = _error_kb(work_tmp)
+    entries = {e.doc_id: e for e in core.load_manifest(kb)}
+    entry = entries["A/d0"]
+    error = core.extract_error_candidates(core.read_doc(kb, entry))[0]
+
+    def responses(prompt, call):
+        return core.GeneratedTicket(
+            question=f"库存同步时提示 {error} 报错，麻烦看下怎么处理",
+            severity="high",
+            platform_name="淘宝",
+            error_text=error,
+        )
+
+    generator = core.CachedGenerator(work_tmp / "cache", FakeLLM(responses))
+    plan = core.ErrorSamplePlan(quotas={}, selected=[(entry, error)])
+    attempts, _ = core.run_errors(plan, kb, generator, "fake-model", workers=1)
+    assert attempts[0].ticket is not None
+    assert attempts[0].ticket.error_text == error
+
+    normal = core.GeneratedTicket(question="店铺授权失效了，订单下不来怎么弄", severity="high")
+    items = core.assemble_dataset(
+        [(entry, normal)],
+        [("other", "今天天气不错，聊聊天吧")],
+        [(entry, attempts[0].ticket)],
+    )
+    assert [it.qid for it in items] == ["q0001", "q0002", "q0003"]
+    last = items[-1]
+    assert last.answerable is True
+    assert last.error_text == error
+    assert last.gold_doc_ids == [entry.doc_id]
+    assert last.gold_title_keys == [entry.title_key]
+    assert last.category == core.category_for(entry.top_dir, entry.title)
+
+
+def test_assemble_dataset_without_error_samples_stays_unchanged(work_tmp):
+    entry = core.ManifestEntry(
+        doc_id="A/d0", title="A文档0", title_key="a文档0", top_dir="A", chars=1000
+    )
+    ticket = core.GeneratedTicket(question="库存同步一直失败是怎么回事", severity="medium")
+    old = core.assemble_dataset([(entry, ticket)], [("other", "今天天气不错，聊聊天吧")])
+    explicit = core.assemble_dataset(
+        [(entry, ticket)], [("other", "今天天气不错，聊聊天吧")], []
+    )
+    assert [it.model_dump() for it in old] == [it.model_dump() for it in explicit]
+
+
+def test_write_review_separates_error_samples(work_tmp):
+    kb = _error_kb(work_tmp)
+    entries = {e.doc_id: e for e in core.load_manifest(kb)}
+    entry = entries["A/d0"]
+    error = core.extract_error_candidates(core.read_doc(kb, entry))[0]
+    normal = core.GeneratedTicket(question="店铺授权失效了，订单下不来怎么弄", severity="high")
+    error_ticket = core.GeneratedTicket(
+        question=f"库存同步时提示 {error} 报错，麻烦看下怎么处理",
+        severity="high",
+        error_text=error,
+    )
+    items = core.assemble_dataset(
+        [(entry, normal)],
+        [("other", "今天天气不错，聊聊天吧")],
+        [(entry, error_ticket)],
+    )
+    path = work_tmp / "review.md"
+    core.write_review(path, items, kb, seed=1, n=25)
+    text = path.read_text(encoding="utf-8")
+    assert "报错原文样本" in text
+    assert f"- 报错原文：{error}" in text
+    assert "## q0003" in text.split("报错原文样本", 1)[1]
+
+
+def test_cli_n_error_zero_matches_default_output(work_tmp, capsys):
+    specs = []
+    for top_dir in ["平台对接_店铺授权", "物流对接", "产品功能", "规则中心", "仓储对接"]:
+        for i in range(12):
+            specs.append({"doc_id": f"{top_dir}/d{i:02d}", "top_dir": top_dir, "chars": 1000})
+    kb = build_kb(work_tmp, specs)
+    cli = _load_cli_module()
+    args = [
+        "--kb-dir", str(kb), "--n-answerable", "10", "--n-unanswerable", "3",
+        "--seed", "5", "--dry-run",
+    ]
+
+    assert cli.main(args) == 0
+    baseline = capsys.readouterr().out
+    assert cli.main(args + ["--n-error", "0"]) == 0
+    explicit = capsys.readouterr().out
+
+    assert explicit == baseline
+    assert "报错原文样本" not in baseline
+
+
+def test_cli_dry_run_prints_error_samples(work_tmp, capsys):
+    kb = _error_kb(work_tmp)
+    cli = _load_cli_module()
+    code = cli.main(
+        [
+            "--kb-dir", str(kb), "--n-answerable", "3", "--n-unanswerable", "0",
+            "--n-error", "3", "--seed", "5", "--dry-run",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "报错原文样本抽样（共 3 篇）" in output
+    assert output.count("报错串：") >= 3
+    assert "一条完整的报错样本提示词" in output
+
+
