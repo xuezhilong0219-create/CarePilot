@@ -60,17 +60,19 @@ def test_perfect_planner_scores_full_marks_and_never_leaks(tmp_path):
     path = _gen(tmp_path)
     r = run_tool_selection(path, planner=Oracle(load_tool_dataset(path)))
     assert r["n"] == 60 and r["errors"] == 0
-    assert r["tool_accuracy"]["value"] == 1.0 and r["args_accuracy"]["value"] == 1.0
+    assert r["tool_accuracy"]["value"] == 1.0 and r["args_accuracy"]["value"] == 1.0 and r["ambiguous_ok"]["value"] == 1.0
     assert r["outcome_accuracy"]["value"] == 1.0
     assert r["denied_correct"] == {"value": 1.0, "n": 6} and r["leaks"] == 0 and mismatches(r) == []
 
 
 def test_planner_that_never_calls_tools_is_penalised_but_still_leaks_nothing(tmp_path):
     r = run_tool_selection(_gen(tmp_path), planner=AlwaysNone())
-    assert r["tool_accuracy"]["value"] == 12 / 60  # 只有 12 条 none 样本答对
+    clear = r["tool_accuracy"]["n"]
+    assert r["tool_accuracy"]["value"] == 12 / clear  # 明确问法里只有 12 条 none 样本答对
+    assert r["ambiguous_ok"]["value"] == 0.0 and r["ambiguous_ok"]["n"] == 60 - clear  # 歧义样本里"不查"不算对
     assert r["args_accuracy"]["value"] == 0.0 and r["leaks"] == 0
     assert r["denied_correct"]["value"] == 0.0  # 越权样本期望 not_found，没查就不算对
-    assert len(mismatches(r)) == 48
+    assert len(mismatches(r)) == clear - 12
 
 
 def test_reckless_planner_still_cannot_read_other_shops_orders(tmp_path):
@@ -87,3 +89,23 @@ def test_model_errors_are_counted_separately_not_as_wrong_answers(tmp_path):
 
     r = run_tool_selection(_gen(tmp_path), planner=Boom())
     assert r["errors"] == 60 and r["tool_accuracy"]["n"] == 0
+
+
+def test_ambiguous_phrasings_accept_either_tool_and_are_reported_apart(tmp_path):
+    path = _gen(tmp_path)
+    items = load_tool_dataset(path)
+    amb = [i for i in items if i["ambiguous"]]
+    assert amb and all(set(i["acceptable_tools"]) == {"query_order", "query_shipment"} for i in amb)
+    assert all(i["acceptable_tools"] == [i["expected_tool"]] for i in items if not i["ambiguous"])
+
+    class Shipper:  # 对所有"订单类"问题都去查物流
+        def __init__(self, items):
+            self.by_question = {i["question"]: i for i in items}
+
+        def invoke(self, messages):
+            i = self.by_question[messages[1].content]
+            return ToolPlan(tool="query_shipment", **i["expected_args"]) if i["expected_tool"] == "query_order" else Oracle(items).invoke(messages)
+
+    r = run_tool_selection(path, planner=Shipper(items))
+    assert r["ambiguous_ok"]["value"] == 1.0 and r["ambiguous_chose_shipment"]["value"] == 1.0
+    assert r["tool_accuracy"]["value"] < 1.0  # 明确问法里"查订单"被换成"查物流"仍然算错，歧义豁免不外溢

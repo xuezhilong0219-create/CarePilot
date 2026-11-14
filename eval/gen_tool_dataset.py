@@ -26,6 +26,14 @@ from carepilot.sandbox.data import World, build_world  # noqa: E402
 
 CUSTOMERS = ("c1", "c2", "c3")
 
+# 这三种问法既可能是查订单状态，也可能是查物流进度，语义上就是歧义的。真实模型选 query_shipment 是合理的，
+# 所以这些样本两个工具都算对，并且单独统计（见 tool_eval），不和"明确问法"的准确率混在一起。
+AMBIGUOUS_ORDER_TEMPLATES = (
+    "订单号 {order_id}，麻烦看下发货了没",
+    "客户说没收到货，订单 {order_id} 是什么情况",
+    "订单 {order_id} 为什么还没发货呀",
+)
+
 ORDER_TEMPLATES = (
     "帮我查一下订单 {order_id} 现在什么状态",
     "订单号 {order_id}，麻烦看下发货了没",
@@ -107,6 +115,8 @@ def _item(
         "expected_tool": tool,
         "expected_args": args,
         "expected_outcome": outcome,
+        "acceptable_tools": [tool],
+        "ambiguous": False,
     }
 
 
@@ -126,6 +136,9 @@ def build_dataset(seed: int = 7) -> list[dict[str, Any]]:
         template = ORDER_TEMPLATES[i % len(ORDER_TEMPLATES)]
         question = template.format(order_id=order.order_id, tail=order.order_id[-4:])
         add(question, customer, "query_order", {"order_id": order.order_id}, "found")
+        if template in AMBIGUOUS_ORDER_TEMPLATES:
+            rows[-1]["acceptable_tools"] = ["query_order", "query_shipment"]
+            rows[-1]["ambiguous"] = True
 
     # 物流查询：只取有物流记录的订单
     shipment_pairs = [

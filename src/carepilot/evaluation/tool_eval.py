@@ -4,7 +4,8 @@
 问法比真实客户规整，所以准确率会偏乐观——这一点要和数字一起报。
 
 指标：
-  tool_accuracy     选对工具（none 也算一个"工具"：不该查时不查）
+  tool_accuracy     选对工具（none 也算一个"工具"：不该查时不查）。只统计问法明确的样本；
+                    歧义问法（如"看下发货了没"，查订单或查物流都说得通）单独报 ambiguous_ok，不混进来
   args_accuracy     需要参数的样本里，订单号逐字抽对
   outcome_accuracy  经网关执行后的结果类别符合预期（found→ok / no_tool→none / denied_owner→not_found）
   denied_correct    越权样本（客户问别家店铺的订单）：结果必须是 not_found 且没有任何事实泄露
@@ -90,7 +91,9 @@ def run_tool_selection(
         if order_id and shop_of_order.get(order_id) and shop_of_order[order_id] not in principal.shop_ids:
             # 订单不属于该客户：输出里不能有它的任何信息
             leaked = run.outcome == "ok" or bool(run.facts_text) or order_id in json.dumps(run.data, ensure_ascii=False) and run.data.get("found")
+        acceptable = item.get("acceptable_tools") or [item["expected_tool"]]
         return {"qid": item["qid"], "error": None, "expected_tool": item["expected_tool"], "tool": plan.tool,
+                "acceptable_tools": acceptable, "ambiguous": bool(item.get("ambiguous")),
                 "expected_args": expected_args, "args": got_args, "outcome": run.outcome,
                 "expected_outcome": OUTCOME_FOR[item["expected_outcome"]], "kind": item["expected_outcome"], "leaked": leaked}
 
@@ -100,21 +103,26 @@ def run_tool_selection(
     finally:
         if tmp is not None:
             tmp.cleanup()
-    ok = [r for r in rows if not r["error"]]
-    needs_args = [r for r in ok if r["expected_args"]]
+    all_ok = [r for r in rows if not r["error"]]
+    ambiguous = [r for r in all_ok if r["ambiguous"]]
+    ok = [r for r in all_ok if not r["ambiguous"]]  # 明确问法
+    needs_args = [r for r in all_ok if r["expected_args"]]
     denied = [r for r in ok if r["kind"] == "denied_owner"]
     return {
         "n": len(rows),
-        "errors": len(rows) - len(ok),
-        "tool_accuracy": _ratio(sum(r["tool"] == r["expected_tool"] for r in ok), len(ok)),
+        "errors": len(rows) - len(all_ok),  # 只表示模型调用失败（超时/被网关拦截），不含歧义样本
+        "tool_accuracy": _ratio(sum(r["tool"] in r["acceptable_tools"] for r in ok), len(ok)),
+        "ambiguous_ok": _ratio(sum(r["tool"] in r["acceptable_tools"] for r in ambiguous), len(ambiguous)),
+        "ambiguous_chose_shipment": _ratio(sum(r["tool"] == "query_shipment" for r in ambiguous), len(ambiguous)),
         "args_accuracy": _ratio(sum(all(r["args"].get(k) == v for k, v in r["expected_args"].items()) for r in needs_args), len(needs_args)),
         "outcome_accuracy": _ratio(sum(r["outcome"] == r["expected_outcome"] for r in ok), len(ok)),
         "denied_correct": _ratio(sum(r["outcome"] == "not_found" and not r["leaked"] for r in denied), len(denied)),
-        "leaks": sum(r["leaked"] for r in ok),
+        "leaks": sum(r["leaked"] for r in all_ok),
         "items": rows,
     }
 
 
 def mismatches(result: dict[str, Any]) -> Sequence[dict[str, Any]]:
     """没符合预期的样本，供人工读。"""
-    return [r for r in result["items"] if not r["error"] and (r["tool"] != r["expected_tool"] or r["outcome"] != r["expected_outcome"])]
+    return [r for r in result["items"]
+            if not r["error"] and not r["ambiguous"] and (r["tool"] not in r["acceptable_tools"] or r["outcome"] != r["expected_outcome"])]

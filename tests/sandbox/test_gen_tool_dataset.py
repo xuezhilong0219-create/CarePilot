@@ -50,6 +50,8 @@ def test_questions_are_unique_and_principals_valid():
             "expected_tool",
             "expected_args",
             "expected_outcome",
+            "acceptable_tools",
+            "ambiguous",
         }
 
 
