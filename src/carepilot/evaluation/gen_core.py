@@ -110,7 +110,10 @@ def candidate_docs(entries: Iterable[ManifestEntry]) -> list[ManifestEntry]:
     return [
         e
         for e in entries
-        if e.kept and e.chars >= MIN_DOC_CHARS and not (set(e.flags) & EXCLUDED_FLAGS)
+        if e.kept
+        and e.chars >= MIN_DOC_CHARS
+        and not (set(e.flags) & EXCLUDED_FLAGS)
+        and "导航" not in e.title  # 导航页不是支持文档，拿它当标准答案只会生成怪问题
     ]
 
 
@@ -158,10 +161,14 @@ def allocate_quotas(counts: dict[str, int], n: int) -> dict[str, int]:
         active = [
             d for d in dirs if quotas[d] < single_cap[d] and quotas[d] < counts[d]
         ]
-        if not active:
-            break
         group_used = sum(quotas[d] for d in dirs if d in SPECIAL_DIRS)
         group_room = max(0, group_cap - group_used)
+        if group_room <= 0:
+            # 素材目录合计上限已满：必须把它们移出候选，否则它们会继续按权重分到名额、
+            # 又被清零，剩下的零头永远分不出去（真实分布下会"还差 1 篇"）
+            active = [d for d in active if d not in SPECIAL_DIRS]
+        if not active:
+            break
         weights = {d: math.sqrt(counts[d]) for d in active}
         alloc = _largest_remainder(remaining, weights)
         for d in active:

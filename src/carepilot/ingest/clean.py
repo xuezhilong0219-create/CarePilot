@@ -145,10 +145,19 @@ def is_release_note(title: str) -> bool:
     return bool(_RELEASE_TITLE.match(title)) or any(word in title for word in _RELEASE_WORDS)
 
 
+_LAKESHEET_BLOB = re.compile(r'^\{"format":"lakesheet".*$', re.MULTILINE)
+
+
+def strip_binary_blobs(text: str) -> str:
+    """语雀表格被导出成一整行压缩后的 JSON 二进制（135 篇、占知识库 11.5% 的字符，集中在「统计」目录）。
+    对问答没有任何价值，还会污染 BM25 和向量，剥掉后文档只剩标题，会按 tiny 被丢弃。"""
+    return _LAKESHEET_BLOB.sub("", text)
+
+
 def prepare_text(raw: str) -> Prepared:
     text = normalize_newlines(raw)
     source_url, text = extract_source_url(text)
-    return Prepared(strip_images(text), source_url)
+    return Prepared(strip_binary_blobs(strip_images(text)), source_url)
 
 
 def finalize_document(prepared: Prepared, title: str) -> CleanedDoc:

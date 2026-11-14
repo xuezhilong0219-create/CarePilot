@@ -261,3 +261,16 @@ def test_long_path_write(tmp_path: Path):
     build(raw, out)
     written = _long_path(out / "docs" / rel)
     assert written.exists()
+
+
+def test_lakesheet_blob_is_stripped_and_doc_becomes_tiny():
+    from carepilot.ingest.clean import clean_markdown, strip_binary_blobs
+
+    blob = '{"format":"lakesheet","version":"3.5.5","sheet":"x\x9cí\x9dÝoÓX' + "ÆÿÏÍ" * 200 + '"}'
+    raw = f"> 来源：https://www.yuque.com/a/b\n\n# 发货包裹分析\n\n{blob}\n"
+    doc = clean_markdown(raw, "发货包裹分析")
+    assert "lakesheet" not in doc.text and doc.chars < 80  # 只剩标题 → 会被 tiny 规则丢弃
+    # 正文里夹着乱码行时，只删乱码行，其余文字保留
+    mixed = f"前言说明文字\n{blob}\n后记说明文字"
+    out = strip_binary_blobs(mixed)
+    assert "前言说明文字" in out and "后记说明文字" in out and "lakesheet" not in out

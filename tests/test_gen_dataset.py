@@ -422,3 +422,18 @@ def test_shares_window_equivalent_to_lcs():
     for text in ["点击重新授权后", "店铺管理选中对应店铺", "完全无关的一句话呀呀呀呀呀", "选中对应店铺点击重新授权！", "短"]:
         for window in (5, 8, 12):
             assert shares_window(text, body, window) == (lcs(text, body) >= window)
+
+
+def test_allocate_quotas_on_real_kb_distribution():
+    # 回归：真实知识库的目录分布曾让分配器"还差 1 篇"（素材目录合计上限满后零头分不出去）
+    from carepilot.evaluation.gen_core import SPECIAL_DIRS, allocate_quotas
+
+    counts = {"企业版": 714, "平台对接_店铺授权": 285, "供销平台": 123, "极速版2.0": 59, "😁统计": 94,
+              "基本信息设置": 43, "物流对接": 39, "帮助中心": 30, "分销": 21, "客服通": 12, "WMS": 3,
+              "原掌上百科（Wiki）内部使用": 222, "慧策价值传递素材仓库": 865}
+    for n in (120, 100, 37):
+        q = allocate_quotas(counts, n)
+        assert sum(q.values()) == n
+        assert all(q[d] <= counts[d] for d in counts)
+        assert max(q.values()) <= int(0.35 * n)
+        assert sum(q[d] for d in SPECIAL_DIRS) <= int(0.15 * n)
