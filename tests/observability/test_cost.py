@@ -96,3 +96,21 @@ def test_markdown_warns_missing_usage_and_does_not_show_zero_cost(tmp_path):
     assert "token 统计不完整" in md
     assert "0.0000" not in md
     assert report.per_category[0]["avg_cost"] is None
+
+
+def test_total_cost_is_none_if_any_run_is_unpriced_never_a_partial_sum():
+    from carepilot.observability.cost import ModelPrice, Pricing, summarize_cost
+    from carepilot.observability.spec import LlmCall, RunTrace, Span
+
+    def trace(i, model):
+        return RunTrace(run_id=f"r{i}", started_at=0.0, ended_at=1.0, status="resolved",
+                        spans=[Span("n", 0.0, 1.0, llm_calls=[LlmCall("p", model, 1_000_000, 0)])])
+
+    pricing = Pricing(models={"cheap": ModelPrice(2.0, 8.0)}, currency="CNY", source="t", as_of="2026-11-14")
+    full = summarize_cost([trace(1, "cheap"), trace(2, "cheap")], pricing)
+    assert full.total_cost == 4.0 and full.to_dict()["total_cost"] == 4.0
+    assert "合计成本：4.0000 CNY" in full.to_markdown()
+    mixed = summarize_cost([trace(1, "cheap"), trace(2, "unknown-model")], pricing)
+    assert mixed.total_cost is None  # 一单没有单价，就不给合计，不能把已知的那一单当总数
+    assert "合计成本" not in mixed.to_markdown()
+    assert summarize_cost([], pricing).total_cost == 0.0

@@ -98,6 +98,7 @@ class CostReport:
     currency: str = ""
     source: str = ""
     as_of: str = ""
+    total_cost: float | None = None  # 任何一单缺单价就是 None：不能把已知的部分加起来冒充总数
 
     @property
     def total_tokens(self) -> int:
@@ -117,6 +118,8 @@ class CostReport:
         )
         if self.source and self.as_of:
             lines.append(f"单价来源：{self.source}（{self.as_of}）")
+            if self.total_cost is not None:
+                lines.append(f"合计成本：{self.total_cost:.4f} {self.currency}")
         else:
             lines.append(_UNPRICED)
         if self.usage_missing_calls:
@@ -246,7 +249,10 @@ def summarize_cost(traces: Sequence[RunTrace], pricing: Pricing) -> CostReport:
         )
     per_category.sort(key=lambda row: row["category"])
 
+    ticket_costs = [row["cost"] for row in per_ticket]
+    total_cost = None if any(c is None for c in ticket_costs) else float(sum(ticket_costs))
     return CostReport(
+        total_cost=total_cost,
         runs=len(traces),
         calls_by_purpose=dict(sorted(calls_by_purpose.items())),
         prompt_tokens=prompt_total,
