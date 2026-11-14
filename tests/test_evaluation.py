@@ -467,3 +467,20 @@ def test_run_retrieval_skips_unanswerable_items_so_they_do_not_dilute_hit_rates(
     mixed = summarize_retrieval(run_retrieval(answerable + unanswerable, retriever, k=3), k=3)
     assert mixed["n"] == only["n"] == 4
     assert mixed["hit@k_strict"] == only["hit@k_strict"]
+
+
+def test_run_retrieval_both_modes_write_two_distinct_reports(tmp_path: Path, monkeypatch):
+    # 回归：--query-mode both 配合 --name 时，两份报告曾写到同一个文件名，后一份覆盖前一份
+    dataset_path = tmp_path / "dataset.jsonl"
+    dump_dataset(_retrieval_items(), dataset_path)
+    fake_factory = types.ModuleType("carepilot.retrieval.factory")
+    fake_factory.build_retriever = lambda kind, kb, **kwargs: BM25Retriever(load_kb(kb))
+    monkeypatch.setitem(sys.modules, "carepilot.retrieval.factory", fake_factory)
+    spec = importlib.util.spec_from_file_location("eval_run_retrieval2", ROOT / "eval" / "run_retrieval.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    code = module.main(["--dataset", str(dataset_path), "--kb-dir", str(ROOT / "data" / "kb"), "--k", "3",
+                        "--query-mode", "both", "--name", "exp", "--report-dir", str(tmp_path)])
+    assert code == 0
+    assert sorted(p.name.split("_", 2)[2] for p in tmp_path.glob("*_exp_*.json")) == ["exp_raw.json", "exp_triaged.json"]

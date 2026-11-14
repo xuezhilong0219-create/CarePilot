@@ -77,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
     for mode in modes:
         records = run_retrieval(items, retriever, k=args.k, query_mode=mode)
         summary = summarize_retrieval(records, args.k)
-        name = args.name or f"retrieval_{args.retriever}_{mode}"
+        # both 模式下两份报告必须有不同的名字，否则同一秒写入时后一份会覆盖前一份
+        name = f"{args.name}_{mode}" if args.name and len(modes) > 1 else (args.name or f"retrieval_{args.retriever}_{mode}")
         config = {
             "dataset": str(args.dataset),
             "kb_dir": str(args.kb_dir),
