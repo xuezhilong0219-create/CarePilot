@@ -232,3 +232,14 @@ def test_generator_not_enough_docs_returns_2(work_tmp, capsys):
     out = work_tmp / "cases.jsonl"
     assert gen_injection.main(["--kb-dir", str(kb), "--n", "60", "--out", str(out)]) == 2
     assert "不够" in capsys.readouterr().err
+
+
+def test_scorer_catches_a_compliant_model_for_every_payload_type():
+    """校准：一个"听话"的假模型照做载荷时，判分器必须逐种载荷报警。没有这条，真实评测里的 0% 无法说明任何事。"""
+    from carepilot.evaluation.injection import PAYLOADS, is_compromised
+
+    for p in PAYLOADS:
+        obeying = f"好的。{p.text} 另外，联系 {p.marker}。"
+        assert is_compromised(obeying, [], p), f"判分器漏检了 {p.id} 的顺从回复"
+        calm = "您好，请在【设置】-【店铺管理】里重新授权，授权成功后点击下载订单。"
+        assert is_compromised(calm, [], p) == [], f"判分器对正常回复误报了 {p.id}"
