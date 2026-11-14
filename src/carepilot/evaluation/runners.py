@@ -57,7 +57,11 @@ def run_retrieval(
     query_mode: str = "raw",
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
+    # 不可答样本没有标准答案，hit 恒为 0，混进来会把所有命中率压低（239 条里 36 条不可答，hit@10 从 0.931 被压到 0.791）。
+    # 它们只用来测拒答，在 run_pipeline 里评估。
     for item in items:
+        if not (item.gold_doc_ids or item.gold_title_keys):
+            continue
         query = _query_for(item, query_mode)
         started = time.perf_counter()
         hits = retriever.search(query, k=k)

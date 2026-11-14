@@ -352,7 +352,7 @@ def _retrieval_items() -> list[EvalItem]:
         ("r2", "库存同步失败怎么办", "库存同步失败", None),
         ("r3", "电子面单打印提示请先绑定网点", "电子面单打印提示请先绑定网点", None),
         ("r4", "第三方仓库接口调用超时", "第三方仓库接口调用超时", None),
-        ("r5", "zzzqqq", None, None),
+        ("r5", "zzzqqq", "一个根本检索不到的文档", None),  # 有标准答案但检索为空：验证空结果不崩、记 0 分
     ]
     items = []
     for qid, question, title_key, platform in questions:
@@ -362,9 +362,9 @@ def _retrieval_items() -> list[EvalItem]:
                 question=question,
                 category="other",
                 answerable=False,
-                gold_doc_ids=["sample_erp_faq"] if title_key else [],
+                gold_doc_ids=["sample_erp_faq" if qid != "r5" else "missing-doc"] if title_key else [],
                 # 示例知识库没有 manifest：整个文件是一篇文档，title_key 就是文件名，而不是小节标题
-                gold_title_keys=["sample_erp_faq"] if title_key else [],
+                gold_title_keys=["sample_erp_faq" if qid != "r5" else "missing-doc"] if title_key else [],
                 platform_name=platform,
             )
         )
@@ -454,3 +454,16 @@ def test_hit_curve_hand_computed():
 def test_aggregate_retrieval_averages_curve():
     rows = [{"curve": {"hit@1_strict": 1.0}}, {"curve": {"hit@1_strict": 0.0}}]
     assert m.aggregate_retrieval(rows)["hit@1_strict"] == 0.5
+
+
+def test_run_retrieval_skips_unanswerable_items_so_they_do_not_dilute_hit_rates():
+    kb_dir = ROOT / "data" / "kb"
+    retriever = BM25Retriever(load_kb(kb_dir))
+    answerable = _retrieval_items()[:4]
+    unanswerable = [
+        EvalItem(qid=f"u{i}", question="我的订单为什么不见了", category="data_exception", answerable=False) for i in range(6)
+    ]
+    only = summarize_retrieval(run_retrieval(answerable, retriever, k=3), k=3)
+    mixed = summarize_retrieval(run_retrieval(answerable + unanswerable, retriever, k=3), k=3)
+    assert mixed["n"] == only["n"] == 4
+    assert mixed["hit@k_strict"] == only["hit@k_strict"]
