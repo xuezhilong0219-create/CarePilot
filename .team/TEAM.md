@@ -84,3 +84,12 @@ manifest 每行：
 遗留问题 / 与说明不一致之处:
 需要 Claude 决定的事:
 ```
+
+
+## 第二阶段补充（治理层）
+
+- 新增冻结接口：`src/carepilot/auth.py`、`src/carepilot/gateway/spec.py`。**不能改**，需要改就写进报告。
+- 这一阶段每个 worker 只做**自包含模块**（网关 / 工单存储 / 业务沙箱），**不改 `graph/`、`api/`**，集成由 Claude 做。各自的文件归属见任务说明，越界会造成冲突。
+- 这些模块里**不能有任何 LLM 调用**；测试不联网、不依赖 `.env`。
+- SQLite 测试文件放 `tmp_path`；如果你的沙箱不允许用 `tmp_path`，放在仓库根的 `.tmp_test/`（已 gitignore），测试结束要清理。
+- 需求背景和验收口径在 `docs/requirements.md`；那里写的"谁做"只对你的任务编号负责，别替别人做。

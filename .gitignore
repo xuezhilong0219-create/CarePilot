@@ -16,3 +16,8 @@ data/models/
 jieba.cache
 pytest-cache-files-*/
 .pytest-probe-*/
+# worker 沙箱留下的临时目录
+.tmp_test/
+.pytest_tmp*/
+.local_tmp_mode/
+.pytest-probe-*/
