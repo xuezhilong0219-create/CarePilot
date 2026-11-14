@@ -1,0 +1,14 @@
+.env
+.venv
+.git
+.gitignore
+.pytest_cache
+**/__pycache__
+**/*.pyc
+data/raw
+data/kb_real
+data/index
+data/models
+eval/real
+.team
+tests
