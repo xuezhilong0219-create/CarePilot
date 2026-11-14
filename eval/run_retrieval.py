@@ -38,12 +38,18 @@ def _build_retriever(args: argparse.Namespace):
     # 延迟 import：factory 由别的 worker 实现，单测和 --help 不依赖它
     from carepilot.retrieval.factory import build_retriever
 
+    settings = None
+    if args.retriever == "hybrid_rerank_llm":  # 只有 LLM 重排需要网关配置，其他种类不依赖 .env
+        from carepilot.config import get_settings
+
+        settings = get_settings()
     return build_retriever(
         args.retriever,
         args.kb_dir,
         index_dir=args.index_dir,
         exclude_dirs=_split(args.exclude_dirs),
         exclude_flags=_split(args.exclude_flags),
+        settings=settings,
     )
 
 
