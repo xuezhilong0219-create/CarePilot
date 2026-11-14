@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -100,6 +101,24 @@ class RunTracer:
                 self._trace.ended_at = self._clock()
                 self._ended = True
             return self._trace
+
+    def set_status(self, status: str) -> None:
+        """非终态的状态更新（如 awaiting_review）。run 跨 HTTP 请求（审核恢复）时，每个阶段结束都要落一次盘。"""
+        with self._lock:
+            if not self._ended:
+                self._trace.status = status
+
+    def snapshot(self) -> RunTrace:
+        """当前 trace 的深拷贝：落盘时用，避免序列化过程中被并发写入的 span 改动。"""
+        with self._lock:
+            return RunTrace.from_dict(copy.deepcopy(self._trace.to_dict()))
+
+    @classmethod
+    def from_trace(cls, trace: RunTrace, *, clock: Callable[[], float] = time.time) -> "RunTracer":
+        """从落盘的 trace 续写：进程重启后审核恢复同一个 run 时，不能把之前的节点覆盖掉。"""
+        tracer = cls(trace.run_id, ticket_id=trace.ticket_id, category=trace.category, clock=clock)
+        tracer._trace = RunTrace.from_dict(copy.deepcopy(trace.to_dict()))
+        return tracer
 
 
 def llm_call_from_message(

@@ -140,3 +140,25 @@ def test_null_tracer_is_noop():
     trace = tracer.end("resolved")
     assert trace.run_id == "null-run"
     assert trace.spans == []
+
+
+def test_snapshot_set_status_and_resume_from_a_saved_trace():
+    from carepilot.observability.tracer import RunTracer
+
+    t = RunTracer("r-resume", ticket_id="T-000001")
+    with t.span("classify", input_summary="a") as sp:
+        sp.set_output("b")
+    t.set_status("awaiting_review")
+    snap = t.snapshot()
+    assert snap.status == "awaiting_review" and [s.name for s in snap.spans] == ["classify"]
+    with t.span("later"):
+        pass
+    assert [s.name for s in snap.spans] == ["classify"]  # 快照是深拷贝，不受后续写入影响
+
+    t2 = RunTracer.from_trace(snap)  # 模拟进程重启后审核恢复
+    with t2.span("execute_actions"):
+        pass
+    final = t2.end("resolved")
+    assert [s.name for s in final.spans] == ["classify", "execute_actions"] and final.run_id == "r-resume"
+    t2.set_status("running")  # 结束后不能再改状态
+    assert t2.snapshot().status == "resolved"
