@@ -118,13 +118,20 @@ def candidate_docs(entries: Iterable[ManifestEntry]) -> list[ManifestEntry]:
     ]
 
 
+# 只靠标题里有"通知/变更"二字会把「订单变更--全自动化处理」「发货单缺货通知接口」这类功能/接口文档误标成规则变更
+# （实测抽 6 条错 2 条）。真正的平台通知有稳定的形态：带日期前缀的通知，或明确的规则/政策/公告/切换类措辞。
+_RULE_TITLE = re.compile(
+    r"^【\d{1,2}[.\-月]\d{1,2}[日号]?】|规则变更|政策|公告|(?:最新|切换|改造|升级|调整|下线)通知|通知$"
+)
+
+
 def category_for(top_dir: str, title: str) -> Category:
     """类别标签必须确定性，不能交给 LLM 判断。顺序即优先级。"""
     if top_dir == "平台对接_店铺授权":
         return "platform_integration"
     if top_dir in WAREHOUSE_DIRS:
         return "warehouse_logistics"
-    if re.search(r"规则|政策|公告|通知|变更", title):
+    if _RULE_TITLE.search(title):
         return "rule_change"
     return "feature_howto"
 

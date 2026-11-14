@@ -695,3 +695,13 @@ def test_plan_rule_samples_picks_only_rule_change_docs_and_excludes():
     assert entries[0].doc_id not in {e.doc_id for e in plan.selected + plan.backups}
     again = plan_rule_samples(entries, 3, seed=1, exclude_doc_ids={entries[0].doc_id})
     assert [e.doc_id for e in again.selected] == [e.doc_id for e in plan.selected]
+
+
+def test_category_for_rule_title_is_not_fooled_by_substrings():
+    from carepilot.evaluation.gen_core import category_for
+
+    for title in ["【4.11】【淘宝回传SN码最新通知】", "【6.13】【启博微分销平台订单号规则变更 】", "快手服务费通知最新通知",
+                  "平台规则变更公告", "【3.14】唯品mp通知"]:
+        assert category_for("企业版", title) == "rule_change", title
+    for title in ["订单变更--全自动化处理", "发货单缺货通知接口", "订单审核", "库存同步常见问题"]:
+        assert category_for("企业版", title) == "feature_howto", title
