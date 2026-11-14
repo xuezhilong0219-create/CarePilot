@@ -38,6 +38,13 @@ class Triage(BaseModel):
     product_edition: str | None = Field(None, description="产品版本，如 企业版、极速版")
     error_text: str | None = Field(None, description="客户贴出的报错原文，逐字保留，不要改写")
     fault_description: str | None = Field(None, description="问题现象的一句话概括")
+    is_vague: bool = Field(
+        False,
+        description=(
+            "消息是否笼统到无法判断要查什么：没有说明是哪个功能/页面、什么现象、什么报错，"
+            "例如「系统用不了」「订单有问题」「帮我看一下」。只要提到了具体的功能、操作、现象或报错，就填 false"
+        ),
+    )
 
 
 class DraftResult(BaseModel):
@@ -45,7 +52,7 @@ class DraftResult(BaseModel):
 
     answerable: bool = Field(description="仅凭给定资料能否可靠地回答；资料不相关或不足就填 false")
     reply: str = Field(description="给客户的回复；answerable=false 时留空")
-    cited_ids: list[str] = Field(default_factory=list, description="回复所依据的资料编号")
+    cited_ids: list[str] = Field(default_factory=list, description="回复所依据资料的编号：资料前方括号里的数字，如 [\"1\", \"3\"]")
 
 
 class TicketState(TypedDict, total=False):

@@ -11,6 +11,7 @@ from typing import Any
 
 from ..config import Settings
 from ..graph.nodes import Models, build_query, make_nodes
+from ..graph.routing import after_classify, after_draft
 from ..retrieval.base import Chunk, Hit, Retriever
 from ..tools import TicketSystem
 from .metrics import (
@@ -130,7 +131,7 @@ def run_pipeline(
     models: Models | None = None,
     concurrency: int = 4,
 ) -> list[dict[str, Any]]:
-    """依次跑 classify →（缺信息则 ask_for_info 停住）→ retrieve → draft_reply，不走 interrupt。"""
+    """依次跑 classify → retrieve → draft_reply，路由用 graph.routing 里和建图同一份函数，不走 interrupt。"""
     recorder = _RecordingRetriever(retriever)
     nodes = make_nodes(settings, recorder, TicketSystem(), models)
 
@@ -143,7 +144,7 @@ def run_pipeline(
             state.update(nodes["classify"](state))
             timings["classify_ms"] = (time.perf_counter() - t0) * 1000
 
-            if state.get("missing_fields"):
+            if after_classify(state) == "ask_for_info":
                 t0 = time.perf_counter()
                 state.update(nodes["ask_for_info"](state))
                 timings["ask_for_info_ms"] = (time.perf_counter() - t0) * 1000
@@ -154,6 +155,8 @@ def run_pipeline(
                 t0 = time.perf_counter()
                 state.update(nodes["draft_reply"](state))
                 timings["draft_ms"] = (time.perf_counter() - t0) * 1000
+                if after_draft(state) == "ask_for_info":  # 回答失败且缺信息 → 追问（和图一致）
+                    state.update(nodes["ask_for_info"](state))
         except Exception as exc:  # 单条失败不能拖垮整批
             timings["total_ms"] = (time.perf_counter() - started) * 1000
             return {

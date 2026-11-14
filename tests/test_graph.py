@@ -25,20 +25,54 @@ def _resume(env, decision, cfg=CFG):
     return env.graph.invoke(Command(resume=decision), cfg)
 
 
-def test_1_missing_required_field_asks_without_retrieval(make_env):
+def test_1a_vague_message_asks_without_retrieval(make_env):
+    env = make_env(make_triage(category="other", is_vague=True), make_draft(), hits=[make_hit()])
+    env.graph.invoke(INITIAL, CFG)
+
+    snap = _state(env)
+    assert snap.values["status"] == "need_info"
+    assert "具体遇到的问题" in snap.values["followup_question"]  # 没有具体缺哪个槽位 → 通用追问
+    assert env.retriever.calls == [] and env.draft.call_count == 0
+
+
+def test_1b_missing_slot_but_answerable_replies_instead_of_asking(make_env):
+    # 回归：旧版把「缺槽位」当检索前的硬门槛，真实评估里 203 条可答样本有 41 条（20%）因此被拦下追问
+    env = make_env(
+        make_triage(category="platform_integration", severity="high"),  # 没抽到 platform_name
+        make_draft(cited_ids=["1"]),
+        hits=[make_hit()],
+    )
+    env.graph.invoke(INITIAL, CFG)
+
+    snap = _state(env)
+    assert _interrupts(snap) and _interrupts(snap)[0]["resolution"] == "auto_reply"
+    assert env.draft.call_count == 1
+
+
+def test_1c_cannot_answer_and_slot_missing_asks_for_that_slot(make_env):
     env = make_env(
         make_triage(category="platform_integration", severity="high"),
-        make_draft(),
+        make_draft(answerable=False),
         hits=[make_hit()],
     )
     env.graph.invoke(INITIAL, CFG)
 
     snap = _state(env)
     assert snap.values["status"] == "need_info"
-    assert snap.values["resolution"] == "need_info"
     assert "电商平台名称" in snap.values["followup_question"]
-    assert env.retriever.calls == []
-    assert env.draft.call_count == 0
+    assert env.draft.call_count == 1 and not _interrupts(snap)
+
+
+def test_1d_cannot_answer_and_nothing_missing_escalates(make_env):
+    env = make_env(
+        make_triage(category="platform_integration", severity="high", platform_name="京东"),
+        make_draft(answerable=False),
+        hits=[make_hit()],
+    )
+    env.graph.invoke(INITIAL, CFG)
+
+    pending = _interrupts(_state(env))
+    assert pending and pending[0]["resolution"] == "escalate"
 
 
 def test_2_approve_sends_draft_and_resolves(make_env):

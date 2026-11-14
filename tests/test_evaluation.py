@@ -484,3 +484,27 @@ def test_run_retrieval_both_modes_write_two_distinct_reports(tmp_path: Path, mon
                         "--query-mode", "both", "--name", "exp", "--report-dir", str(tmp_path)])
     assert code == 0
     assert sorted(p.name.split("_", 2)[2] for p in tmp_path.glob("*_exp_*.json")) == ["exp_raw.json", "exp_triaged.json"]
+
+
+def test_run_pipeline_follows_the_same_routing_as_the_graph():
+    # 评估运行器和建图共用 graph.routing；这里锁住三条路径，防止两边再次分叉
+    from fakes import FakeRetriever, ScriptedInvoker, make_draft, make_hit, make_triage
+
+    settings = Settings(llm_api_key="test", llm_base_url="http://localhost:0/v1")
+
+    def run(triage, draft, hits):
+        item = EvalItem(qid="q", question="x", category="other", answerable=True)
+        models = Models(triage=ScriptedInvoker(triage), draft=ScriptedInvoker(draft))
+        return run_pipeline([item], settings, FakeRetriever(hits), models=models, concurrency=1)[0]
+
+    vague = run(make_triage(category="other", is_vague=True), make_draft(), [make_hit()])
+    assert vague["resolution"] == "need_info" and "draft_ms" not in vague["timings_ms"]  # 笼统：不检索不生成
+
+    answered = run(make_triage(category="platform_integration"), make_draft(cited_ids=["1"]), [make_hit()])
+    assert answered["resolution"] == "auto_reply"  # 缺槽位但可回答：直接回复
+
+    asked = run(make_triage(category="platform_integration"), make_draft(answerable=False), [make_hit()])
+    assert asked["resolution"] == "need_info"  # 答不了且缺槽位：追问
+
+    escalated = run(make_triage(category="platform_integration", platform_name="京东"), make_draft(answerable=False), [make_hit()])
+    assert escalated["resolution"] == "escalate"  # 答不了且不缺：升级

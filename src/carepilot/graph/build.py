@@ -5,6 +5,7 @@ from ..config import Settings
 from ..retrieval.base import Retriever
 from ..tools import TicketSystem
 from .nodes import Models, make_nodes
+from .routing import after_classify, after_draft
 from .state import TicketState
 
 
@@ -22,16 +23,14 @@ def build_graph(
 
     g.add_edge(START, "classify")
     g.add_conditional_edges(
-        "classify",
-        lambda s: "ask_for_info" if s["missing_fields"] else "retrieve",
-        {"ask_for_info": "ask_for_info", "retrieve": "retrieve"},
+        "classify", after_classify, {"ask_for_info": "ask_for_info", "retrieve": "retrieve"}
     )
     g.add_edge("ask_for_info", END)  # 追问后流程结束；客户补充信息后作为新一轮请求进入
     g.add_edge("retrieve", "draft_reply")
     g.add_conditional_edges(
         "draft_reply",
-        lambda s: "human_review" if s["resolution"] == "auto_reply" else "route_escalation",
-        {"human_review": "human_review", "route_escalation": "route_escalation"},
+        after_draft,
+        {"human_review": "human_review", "ask_for_info": "ask_for_info", "route_escalation": "route_escalation"},
     )
     g.add_edge("route_escalation", "human_review")
     g.add_edge("human_review", "execute_actions")
