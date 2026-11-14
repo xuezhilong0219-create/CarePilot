@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     kb_dir: Path = ROOT / "data" / "kb"
     checkpoint_db: Path = ROOT / "data" / "checkpoints.sqlite"
     retrieval_top_k: int = 4
+    # bm25（默认）| vector | hybrid | hybrid_rerank_ce | hybrid_rerank_llm。
+    # 默认 bm25：评估里客户习惯贴报错原文、平台名搜，BM25 本来就强；混合检索的提升在 test 半边不显著，
+    # 却要多装 1 个本地 embedding 模型、预建 20 分钟的索引。要启用见 README 的「检索策略」一节。
+    retriever_kind: str = "bm25"
+    index_dir: Path | None = None
 
 
 def get_settings() -> Settings:

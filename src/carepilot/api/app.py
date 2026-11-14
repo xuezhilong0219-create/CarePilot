@@ -15,8 +15,7 @@ from ..config import Settings, get_settings
 from ..graph.build import build_graph
 from ..graph.nodes import Models
 from ..retrieval.base import Retriever
-from ..retrieval.bm25 import BM25Retriever
-from ..retrieval.chunking import load_kb
+from ..retrieval.factory import build_retriever
 from ..tools import TicketSystem
 
 
@@ -101,7 +100,9 @@ def create_app(
         s = settings or get_settings()
         application.state.settings = s
         application.state.system = system or TicketSystem()
-        r = retriever if retriever is not None else BM25Retriever(load_kb(s.kb_dir))
+        r = retriever if retriever is not None else build_retriever(
+            s.retriever_kind, s.kb_dir, index_dir=s.index_dir, settings=s
+        )
         conn = None
         cp = checkpointer
         if cp is None:
