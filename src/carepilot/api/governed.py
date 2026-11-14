@@ -17,6 +17,9 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from ..auth import Principal, Role
+from ..gateway.guard import BudgetExceeded, RunBudget, RunGuard
+from ..gateway.spec import ToolContext
+from ..observability.tracer import RunTracer
 from ..store import Conflict, Forbidden, IllegalTransition, NotFound, Ticket, build_handoff, can_modify
 from ..toolbox import SYSTEM_PRINCIPAL, principal_to_dict
 from .app import _sse, _summary
@@ -123,27 +126,76 @@ def register_governed(app: FastAPI) -> None:
             out["pending_confirmation"] = values.get("pending_confirmation") if workflow == "awaiting_confirmation" else None
             out["actions"] = values.get("actions")
             out["triage"] = values.get("triage")
+            out["abort_reason"] = values.get("escalate_reason") if workflow == "needs_human" else None
         return out
 
+    def tracer_for(thread_id: str, ticket_id: str) -> RunTracer:
+        """同一个 run 跨审核阶段共用一个 tracer；进程重启后从磁盘上的 trace 续写，不覆盖之前的节点。"""
+        runs = app.state.runs
+        if thread_id not in runs:
+            try:
+                runs[thread_id] = RunTracer.from_trace(app.state.trace_store.load(thread_id))
+            except (FileNotFoundError, ValueError):
+                runs[thread_id] = RunTracer(thread_id, ticket_id=ticket_id)
+        return runs[thread_id]
+
+    def new_guard() -> RunGuard:
+        st = app.state.settings
+        return RunGuard(RunBudget(max_steps=st.run_max_steps, max_tokens=st.run_max_tokens, max_seconds=st.run_max_seconds))
+
+    def run_config(thread_id: str, tracer: RunTracer) -> dict:
+        return {"configurable": {"thread_id": thread_id, "tracer": tracer, "guard": new_guard()}}
+
+    def save_trace(tracer: RunTracer, view: dict[str, Any] | None, *, triage: dict | None, aborted: bool = False) -> None:
+        # 分诊结果取自图的状态，不能取自 view：客户视角的 view 不含 triage（内部信息）
+        tracer.set_category((triage or {}).get("category"))
+        status = "budget_exceeded" if aborted else (view or {}).get("status") or "running"
+        if status in ("awaiting_review", "awaiting_confirmation"):
+            tracer.set_status(status)
+        else:
+            tracer.end(status)
+        app.state.trace_store.save(tracer.snapshot())
+
+    def abort_run(ticket_id: str, thread_id: str, cfg: dict, tracer: RunTracer, reason: str) -> None:
+        """预算守卫中止：不替人做状态变更（改状态需要人工批准），只留一条内部备注，把工单标成需要人工接手。"""
+        tb = app.state.toolbox
+        tb.gateway.call(ToolContext(SYSTEM_PRINCIPAL, thread_id, ticket_id), "add_note",
+                        {"ticket_id": ticket_id, "kind": "note", "body": f"自动处理被预算守卫中止（{reason}），请人工接手。"})
+        app.state.graph.update_state(cfg, {"status": "needs_human", "escalate_reason": f"budget:{reason}"}, as_node="execute_actions")
+        app.state.store.put_context(ticket_id, slots=app.state.store.get_context(ticket_id)["slots"], last_thread_id=thread_id)
+
+    def run_graph(graph_input: Any, thread_id: str, ticket: Ticket, principal: Principal, *, stream: bool):
+        graph = app.state.graph
+        tracer = tracer_for(thread_id, ticket.ticket_id)
+        cfg = run_config(thread_id, tracer)
+
+        def finish(aborted_reason: str | None = None) -> dict[str, Any]:
+            if aborted_reason:
+                abort_run(ticket.ticket_id, thread_id, cfg, tracer, aborted_reason)
+            values = dict(graph.get_state(cfg).values)
+            sync_after_run(ticket.ticket_id, thread_id, values)
+            view = build_view(principal, ticket.ticket_id)
+            save_trace(tracer, view, triage=values.get("triage"), aborted=bool(aborted_reason))
+            return view
+
+        if not stream:
+            try:
+                graph.invoke(graph_input, cfg)
+            except BudgetExceeded as exc:
+                return finish(exc.reason)
+            return finish()
+        return StreamingResponse(_stream(graph_input, cfg, finish), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     def run_turn(principal: Principal, ticket: Ticket, message: str, *, stream: bool):
-        store, graph = app.state.store, app.state.graph
+        store = app.state.store
         ctx = store.get_context(ticket.ticket_id)
         history = history_for(ticket)  # 必须在写入本条消息之前取，否则本句会同时出现在"历史"和"本句"里
         store.add_message(ticket.ticket_id, author=principal, kind="message", body=message, visibility="public")
         thread_id = uuid.uuid4().hex
         state = {"ticket_id": ticket.ticket_id, "run_id": thread_id, "customer_message": message,
                  "principal": principal_to_dict(principal), "history": history, "slots": ctx["slots"]}
-        cfg = thread_config(thread_id)
-
-        def finish() -> dict[str, Any]:
-            sync_after_run(ticket.ticket_id, thread_id, dict(graph.get_state(cfg).values))
-            return build_view(principal, ticket.ticket_id)
-
-        if not stream:
-            graph.invoke(state, cfg)
-            return finish()
-        return StreamingResponse(_stream(state, cfg, finish), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return run_graph(state, thread_id, ticket, principal, stream=stream)
 
     def _stream(graph_input: Any, cfg: dict, finish) -> Iterator[str]:
         try:
@@ -152,6 +204,8 @@ def register_governed(app: FastAPI) -> None:
                     if node != "__interrupt__":
                         yield _sse("node", {"node": node, "summary": _summary(node, payload)})
             view = finish()
+        except BudgetExceeded as exc:
+            view = finish(exc.reason)
         except Exception as exc:  # 流已开始，异常只能作为事件发出
             yield _sse("error", {"message": str(exc)})
             return
@@ -200,18 +254,8 @@ def register_governed(app: FastAPI) -> None:
                 store.claim(principal, ticket_id)
             elif not can_modify(principal, ticket):
                 raise Forbidden("ticket is owned by another agent")
-        cfg = thread_config(thread_id)
         resume = Command(resume={**body.model_dump(exclude_none=True), "reviewer": principal_to_dict(principal)})
-
-        def finish() -> dict[str, Any]:
-            sync_after_run(ticket_id, thread_id, dict(graph.get_state(cfg).values))
-            return build_view(principal, ticket_id)
-
-        if not stream:
-            graph.invoke(resume, cfg)
-            return finish()
-        return StreamingResponse(_stream(resume, cfg, finish), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        return run_graph(resume, thread_id, ticket, principal, stream=stream)
 
     @app.post("/tickets/{ticket_id}/confirm")
     def confirm(ticket_id: str, principal: Principal = Depends(staff_only)):

@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     tickets_db: Path = ROOT / "data" / "tickets.sqlite"
     gateway_db: Path = ROOT / "data" / "gateway.sqlite"
     trace_dir: Path = ROOT / "data" / "traces"
+    # 预算守卫：每个 HTTP 阶段（一次提交 / 一次审核）一份预算
+    run_max_steps: int = 20
+    run_max_tokens: int = 50_000
+    run_max_seconds: float = 120.0
 
 
 def get_settings() -> Settings:

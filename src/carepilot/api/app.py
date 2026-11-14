@@ -137,6 +137,11 @@ def create_app(
                 logistics = LogisticsClient(lambda oid: sandbox_tools.query_shipment(world, oid))
                 tb = Toolbox(world=world, store=st, logistics=logistics, db_path=s.gateway_db)
             kb_chunks = chunks if chunks is not None else load_kb(s.kb_dir)
+            from ..observability.tracer import TraceStore
+
+            s.trace_dir.mkdir(parents=True, exist_ok=True)
+            application.state.trace_store = TraceStore(s.trace_dir)
+            application.state.runs = {}  # thread_id -> RunTracer（同一个 run 跨审核阶段共用）
             application.state.store, application.state.toolbox = st, tb
             application.state.chunks_by_id = {c.id: c for c in kb_chunks}
             application.state.graph = build_graph(s, r, application.state.system, cp, models=models, toolbox=tb,

@@ -103,5 +103,5 @@ class TicketState(TypedDict, total=False):
     # 人工审核与执行
     review: dict
     actions: list[dict]
-    status: Literal["need_info", "resolved", "escalated", "awaiting_confirmation", "action_failed"]
+    status: Literal["need_info", "resolved", "escalated", "awaiting_confirmation", "action_failed", "needs_human"]
     followup_question: str

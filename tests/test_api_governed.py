@@ -33,7 +33,7 @@ def build(tmp_path, triage, draft=None, planner=None, *, hits=None, models_extra
     tb = Toolbox(world=world, store=store, logistics=logistics, db_path=tmp_path / "g.sqlite")
     t_inv, d_inv, p_inv = (x if isinstance(x, ScriptedInvoker) else ScriptedInvoker(x) for x in (triage, draft, planner))
     app = create_app(
-        settings=Settings(llm_api_key="t", llm_base_url="http://localhost:0/v1"),
+        settings=Settings(llm_api_key="t", llm_base_url="http://localhost:0/v1", trace_dir=tmp_path / "traces"),
         models=Models(triage=t_inv, draft=d_inv, planner=p_inv),
         retriever=FakeRetriever(hits if hits is not None else [Hit(CHUNK, 1.0)]),
         checkpointer=InMemorySaver(), governed=True, store=store, toolbox=tb, chunks=[CHUNK],
@@ -95,7 +95,7 @@ def test_full_flow_query_review_two_step_confirm_and_idempotent_send(tmp_path):
     world = build_world(7)
     mine = own_order(world)
     app, world, store, tb, _ = build(tmp_path, DATA_EXC(), make_draft(reply="订单已发出。", cited_ids=["1"]),
-                                     ToolPlan(tool="query_order", order_id=mine.order_id))
+                                     [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
     with TestClient(app) as c:
         v = c.post("/tickets", json={"message": f"帮我查订单 {mine.order_id}"}, headers=H("c1")).json()
         tid = v["ticket"]["ticket_id"]

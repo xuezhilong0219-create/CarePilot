@@ -1,3 +1,4 @@
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 from ..config import Settings
 from ..gateway.spec import Executed, NeedsApproval, Rejected, ToolContext
 from ..llm import StructuredLLM, get_llm
+from ..observability.hooks import guard_step, take_tokens
 from ..retrieval.base import Retriever
 from ..tools import TicketSystem
 from ..toolbox import SYSTEM_PRINCIPAL, Toolbox, principal_from_dict, principal_to_dict
@@ -95,9 +97,9 @@ class Models:
 
 def default_models(settings: Settings) -> Models:
     return Models(
-        triage=StructuredLLM(get_llm(settings, "fast"), Triage),
-        draft=StructuredLLM(get_llm(settings, "main"), DraftResult),
-        planner=StructuredLLM(get_llm(settings, "fast"), ToolPlan),
+        triage=StructuredLLM(get_llm(settings, "fast"), Triage, purpose="triage", model=settings.llm_fast_model),
+        draft=StructuredLLM(get_llm(settings, "main"), DraftResult, purpose="draft", model=settings.llm_main_model),
+        planner=StructuredLLM(get_llm(settings, "fast"), ToolPlan, purpose="planner", model=settings.llm_fast_model),
     )
 
 
@@ -229,6 +231,7 @@ def make_nodes(
     *,
     toolbox: Toolbox | None = None,
     edition_index: Mapping[str, frozenset[str]] | None = None,
+    max_tool_calls: int = 4,
 ):
     models = models or default_models(settings)
 
@@ -293,27 +296,53 @@ def make_nodes(
         return out
 
     def plan_tools(state: TicketState) -> dict:
-        """规划并执行一次只读查询。planner 只看客户说过的话；参数必须逐字出现在这些话里才会执行。"""
+        """规划并执行只读查询，最多 max_tool_calls 步（比如先查订单、再查物流）。
+        planner 只看客户说过的话；参数必须逐字出现在这些话里才会执行；每一步都过守卫：
+        同一个调用连续出现 3 次、或累计超步数/token/耗时，守卫抛 BudgetExceeded，由 API 层转人工。"""
         history = state.get("history") or []
         said = (render_history(history, customer_only=True) + "\n" if history else "") + state["customer_message"]
-        user = f"【对话历史（仅客户）】\n{render_history(history, customer_only=True)}\n\n【客户本句】\n{state['customer_message']}" if history else state["customer_message"]
-        plan: ToolPlan = models.planner.invoke([SystemMessage(PLANNER_PROMPT), HumanMessage(user)])
-        run = toolbox.run_plan(principal_of(state), state.get("run_id", ""), state.get("ticket_id"), plan, source_text=said)
-        summary = {"outcome": run.outcome, "tool": run.tool, "detail": run.detail}
-        if run.outcome in ("ok", "unavailable"):
-            hit = {"id": run.source_id, "title": "系统查询结果", "text": run.facts_text, "score": 1.0, "kind": "tool"}
-            patch: dict = {"hits": [hit], "tool_run": summary}
-            if run.outcome == "unavailable":  # 降级：确定性文案，不经过模型
-                patch.update(draft=run.facts_text, citations=[run.source_id], resolution="auto_reply",
-                             citation_details=citation_details([run.source_id], [hit]))
+        base_user = (
+            f"【对话历史（仅客户）】\n{render_history(history, customer_only=True)}\n\n【客户本句】\n{state['customer_message']}"
+            if history else state["customer_message"]
+        )
+        runs: list = []
+        seen: set[str] = set()
+        for _ in range(max_tool_calls):
+            note = ""
+            if runs:
+                done = "\n".join(f"- {r.tool}（{r.outcome}）" for r in runs)
+                note = f"\n\n【本轮已执行的查询】\n{done}\n如果已执行的查询足以回答客户，tool 选 none；不要重复提议已经执行过的查询。"
+            plan: ToolPlan = models.planner.invoke([SystemMessage(PLANNER_PROMPT), HumanMessage(base_user + note)])
+            if plan.tool == "none":
+                break
+            args = {k: getattr(plan, k) for k in ("order_id", "shop_id", "ticket_id") if getattr(plan, k)}
+            guard_step("tool", tool=plan.tool, args=args, tokens=take_tokens())
+            key = plan.tool + json.dumps(args, sort_keys=True, ensure_ascii=False)
+            if key in seen:  # 重复提议不再执行；是不是死循环由守卫判定
+                continue
+            seen.add(key)
+            runs.append(toolbox.run_plan(principal_of(state), state.get("run_id", ""), state.get("ticket_id"), plan, source_text=said))
+        if not runs:
+            return {"tool_run": {"outcome": "none", "tool": None, "detail": "", "calls": []}, "resolution": "escalate",
+                    "escalate_reason": "没有合适的查询工具能回答这个问题"}
+        calls = [{"tool": r.tool, "outcome": r.outcome} for r in runs]
+        good = [r for r in runs if r.outcome in ("ok", "unavailable")]
+        if good:
+            hits = [{"id": r.source_id, "title": "系统查询结果", "text": r.facts_text, "score": 1.0, "kind": "tool"} for r in good]
+            has_ok = any(r.outcome == "ok" for r in good)
+            patch: dict = {"hits": hits, "tool_run": {"outcome": "ok" if has_ok else "unavailable", "tool": runs[0].tool, "detail": "", "calls": calls}}
+            if not has_ok:  # 全部降级：确定性文案，不经过模型
+                patch.update(draft=good[0].facts_text, citations=[good[0].source_id], resolution="auto_reply",
+                             citation_details=citation_details([good[0].source_id], hits))
             return patch
-        if run.outcome in ("not_found", "denied"):
+        first = runs[0]
+        summary = {"outcome": first.outcome, "tool": first.tool, "detail": first.detail, "calls": calls}
+        if first.outcome in ("not_found", "denied"):
             question = NOT_FOUND_REPLY  # 无权和不存在文案完全一样，不泄露记录是否存在
-        elif run.outcome == "invalid":
-            question = FOLLOWUP_MISSING.get(run.detail, FOLLOWUP_MISSING["format"])
+        elif first.outcome == "invalid":
+            question = FOLLOWUP_MISSING.get(first.detail, FOLLOWUP_MISSING["format"])
         else:
-            reason = "没有合适的查询工具能回答这个问题" if run.outcome == "none" else f"工具调用失败（{run.detail}）"
-            return {"tool_run": summary, "resolution": "escalate", "escalate_reason": reason}
+            return {"tool_run": summary, "resolution": "escalate", "escalate_reason": f"工具调用失败（{first.detail}）"}
         post_followup(state, question)
         return {"tool_run": summary, "followup_question": question, "resolution": "need_info", "status": "need_info"}
 

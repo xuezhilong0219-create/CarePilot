@@ -5,6 +5,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ..config import Settings
 from ..retrieval.base import Retriever
+from ..observability.hooks import instrument
 from ..tools import TicketSystem
 from ..toolbox import Toolbox
 from .nodes import Models, make_nodes
@@ -21,11 +22,13 @@ def build_graph(
     *,
     toolbox: Toolbox | None = None,
     edition_index: Mapping[str, frozenset[str]] | None = None,
+    max_tool_calls: int = 4,
 ):
     """toolbox 为空时和接入工具之前完全一致（旧的 mock 系统、没有规划节点）；有工具箱时多出：
     需查数据的工单先规划并查询只读工具、草稿写内部备注、写操作全部经网关执行。"""
     tools_on = toolbox is not None
-    n = make_nodes(settings, retriever, system, models, toolbox=toolbox, edition_index=edition_index)
+    n = instrument(make_nodes(settings, retriever, system, models, toolbox=toolbox, edition_index=edition_index,
+                              max_tool_calls=max_tool_calls))
     g = StateGraph(TicketState)
     for name, fn in n.items():
         if name == "plan_tools" and not tools_on:

@@ -93,7 +93,7 @@ def test_data_exception_queries_own_order_then_drafts_from_facts_and_saves_inter
     world = build_world(7)
     mine = order_of(world, "S1")
     env = make_env(DATA_EXC(), make_draft(reply="您的订单已发出。", cited_ids=["1"]),
-                   ToolPlan(tool="query_order", order_id=mine.order_id))
+                   [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
     ticket, cfg = env.start(f"帮我查下订单 {mine.order_id} 的状态")
 
     pending = env.pending(cfg)[0]
@@ -112,7 +112,7 @@ def test_foreign_order_and_nonexistent_order_get_the_same_followup(make_env):
     foreign, mine = order_of(world, "S3"), order_of(world, "S1")
     replies = []
     for oid in (foreign.order_id, "9" * 12):
-        env = make_env(DATA_EXC(), None, ToolPlan(tool="query_order", order_id=oid))
+        env = make_env(DATA_EXC(), None, [ToolPlan(tool="query_order", order_id=oid), ToolPlan(tool="none")])
         ticket, cfg = env.start(f"订单 {oid} 到哪了")
         v = env.snap(cfg).values
         assert v["status"] == "need_info" and env.draft.call_count == 0
@@ -124,7 +124,7 @@ def test_foreign_order_and_nonexistent_order_get_the_same_followup(make_env):
 def test_identifier_the_model_made_up_is_never_executed(make_env):
     world = build_world(7)
     mine = order_of(world, "S1")
-    env = make_env(DATA_EXC(), None, ToolPlan(tool="query_order", order_id=mine.order_id))  # 客户消息里根本没有
+    env = make_env(DATA_EXC(), None, [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])  # 客户消息里根本没有
     ticket, cfg = env.start("我的订单到哪了")
     v = env.snap(cfg).values
     assert v["status"] == "need_info" and "订单号" in v["followup_question"]
@@ -153,7 +153,7 @@ def test_logistics_outage_degrades_to_a_fixed_reply_without_calling_the_draft_mo
     def down(oid):
         raise TimeoutError("carrier down")
 
-    env = make_env(DATA_EXC(), None, ToolPlan(tool="query_shipment", order_id=shipped.order_id), transport=down)
+    env = make_env(DATA_EXC(), None, [ToolPlan(tool="query_shipment", order_id=shipped.order_id), ToolPlan(tool="none")], transport=down)
     ticket, cfg = env.start(f"订单 {shipped.order_id} 物流到哪了")
     p = env.pending(cfg)[0]
     assert p["resolution"] == "auto_reply" and "暂时" in p["draft"] and env.draft.call_count == 0
@@ -163,7 +163,7 @@ def test_logistics_outage_degrades_to_a_fixed_reply_without_calling_the_draft_mo
 def test_approve_is_two_step_nothing_reaches_the_customer_until_confirmed(make_env):
     world = build_world(7)
     mine = order_of(world, "S1")
-    env = make_env(DATA_EXC(), make_draft(reply="订单正在配送。", cited_ids=["1"]), ToolPlan(tool="query_order", order_id=mine.order_id))
+    env = make_env(DATA_EXC(), make_draft(reply="订单正在配送。", cited_ids=["1"]), [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
     ticket, cfg = env.start(f"查订单 {mine.order_id}")
     env.store.claim(A1, ticket.ticket_id)
     v = env.review(cfg, action="approve", reviewer=principal_to_dict(A1))
@@ -179,7 +179,7 @@ def test_approve_is_two_step_nothing_reaches_the_customer_until_confirmed(make_e
 def test_confirm_flag_sends_once_and_resolves_the_ticket_and_edit_uses_reviewer_text(make_env):
     world = build_world(7)
     mine = order_of(world, "S1")
-    env = make_env(DATA_EXC(), make_draft(reply="草稿原文", cited_ids=["1"]), ToolPlan(tool="query_order", order_id=mine.order_id))
+    env = make_env(DATA_EXC(), make_draft(reply="草稿原文", cited_ids=["1"]), [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
     ticket, cfg = env.start(f"查订单 {mine.order_id}")
     env.store.claim(A1, ticket.ticket_id)
     v = env.review(cfg, action="edit", reply="审核人改写后的回复", reviewer=principal_to_dict(A1), confirm=True)
@@ -191,7 +191,7 @@ def test_confirm_flag_sends_once_and_resolves_the_ticket_and_edit_uses_reviewer_
 def test_reviewer_who_does_not_own_the_ticket_cannot_send(make_env):
     world = build_world(7)
     mine = order_of(world, "S1")
-    env = make_env(DATA_EXC(), make_draft(cited_ids=["1"]), ToolPlan(tool="query_order", order_id=mine.order_id))
+    env = make_env(DATA_EXC(), make_draft(cited_ids=["1"]), [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
     ticket, cfg = env.start(f"查订单 {mine.order_id}")
     env.store.claim(A1, ticket.ticket_id)
     v = env.review(cfg, action="approve", reviewer=principal_to_dict(A2), confirm=True)  # a2 不是负责人
