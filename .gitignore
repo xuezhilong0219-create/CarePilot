@@ -22,3 +22,11 @@ pytest-cache-files-*/
 .local_tmp_mode/
 .pytest-probe-*/
 data/traces/
+
+# SQLite 运行期伴生文件、运行时 trace 与临时现场数据
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.lock
+*.lock
+data/live_*
+data/*_traces/

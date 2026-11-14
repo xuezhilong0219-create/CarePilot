@@ -299,3 +299,20 @@ def test_citation_details_have_document_section_edition_and_snippet():
     d = citation_details(["企业版/订单#2", "不存在"], [hit])
     assert len(d) == 1 and d[0]["doc_title"] == "订单" and d[0]["section"] == "合并 > 手动合并"
     assert d[0]["edition"] == "企业版" and d[0]["snippet"].startswith("选中订单") and d[0]["doc_id"] == "企业版/订单"
+
+
+def test_vague_message_gets_the_generic_followup_even_when_a_slot_is_also_missing(make_env):
+    # 回归（真实服务端到端发现）：「我的店铺有问题」被分成 platform_integration 且缺 platform_name，
+    # 旧逻辑只追问"电商平台名称"，客户答了平台之后系统仍然不知道问题是什么
+    env = make_env(make_triage(category="platform_integration", is_vague=True), make_draft(), hits=[])
+    ticket, cfg = env.start("我的店铺有问题，帮我看看")
+    v = env.snap(cfg).values
+    assert v["missing_fields"] == ["platform_name"]  # 槽位确实缺
+    assert "具体遇到的问题" in v["followup_question"] and "电商平台名称" not in v["followup_question"]
+    assert env.retriever.calls == [] and env.draft.call_count == 0
+
+
+def test_not_vague_but_unanswerable_still_asks_for_the_missing_slot(make_env):
+    env = make_env(make_triage(category="platform_integration", is_vague=False), make_draft(answerable=False), hits=[make_hit()])
+    ticket, cfg = env.start("授权过期了怎么办")
+    assert "电商平台名称" in env.snap(cfg).values["followup_question"]

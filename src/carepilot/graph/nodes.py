@@ -264,7 +264,8 @@ def make_nodes(
         return {"triage": data, "missing_fields": missing, "slots": slots}
 
     def ask_for_info(state: TicketState) -> dict:
-        if state["missing_fields"]:
+        # 笼统消息优先问"到底是什么问题"：先补平台名，系统仍然不知道客户要解决什么
+        if state["missing_fields"] and not (state.get("triage") or {}).get("is_vague"):
             labels = "、".join(FIELD_LABELS[f] for f in state["missing_fields"])
             question = f"为了尽快帮您处理，请补充以下信息：{labels}。"
         else:  # 消息笼统、没有具体缺哪个槽位
