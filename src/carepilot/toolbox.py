@@ -43,6 +43,8 @@ KNOWN_TEAMS = frozenset(
         "oncall",
     }
 )
+# 系统自动发给客户的追问只允许这些模板开头（规则闸里校验）：这样即使有人让系统"替客服说话"，也发不出任意文本
+FOLLOWUP_PREFIXES = ("为了尽快帮您处理", "请提供", "您提供的", "没有找到您说的记录")
 LOGISTICS_DEGRADED_REPLY = "您好，物流信息暂时查询不到，请您稍后再试；如果长时间仍然查询不到，我们会安排同事继续跟进。"
 
 _TICKET_ID = r"^T-\d{6}$"
@@ -86,6 +88,19 @@ class EscalateArgs(_Args):
     team: str = Field(pattern=r"^[a-z][a-z0-9_]{2,40}$")
     reason: str = Field(min_length=1, max_length=500)
     actions_summary: str = Field(default="", max_length=1000)
+
+
+def principal_to_dict(p: Principal) -> dict[str, Any]:
+    return {"user_id": p.user_id, "role": p.role.value, "shop_ids": sorted(p.shop_ids)}
+
+
+def principal_from_dict(d: dict[str, Any]) -> Principal:
+    return Principal(d["user_id"], Role(d["role"]), frozenset(d.get("shop_ids", ())))
+
+
+class FollowupArgs(_Args):
+    ticket_id: str = Field(pattern=_TICKET_ID)
+    question: str = Field(min_length=1, max_length=300)
 
 
 def _digest(text: str) -> str:
@@ -249,6 +264,15 @@ class Toolbox:
             t = self._ticket_or_none(a.ticket_id)
             return {"ticket_id": a.ticket_id, "status": "escalated", "team": a.team} if t and t.status == "escalated" else None
 
+        def followup_rule(ctx: ToolContext, a: FollowupArgs) -> None:
+            if not a.question.startswith(FOLLOWUP_PREFIXES):
+                raise RuleViolation("followup_not_templated", "追问只能使用系统模板")
+
+        def post_followup(ctx: ToolContext, a: FollowupArgs) -> dict[str, Any]:
+            m = store.add_message(a.ticket_id, author=ctx.principal, kind="message", body=a.question,
+                                  visibility="public", idem_key=ctx.idem_key)
+            return {"ticket_id": a.ticket_id, "message_id": m.id}
+
         everyone = frozenset(Role)
         return {
             "query_order": ToolSpec("query_order", OrderArgs, query_order, Risk.READ, everyone,
@@ -263,6 +287,9 @@ class Toolbox:
                                  owner_check=lambda ctx, a: self._ticket_or_none(a.ticket_id) is not None
                                  and can_view(ctx.principal, self._ticket_or_none(a.ticket_id)),
                                  summarize_args=lambda a: f"ticket={a.ticket_id}, kind={a.kind}, len={len(a.body)}, sha1={_digest(a.body)}"),
+            "post_followup": ToolSpec("post_followup", FollowupArgs, post_followup, Risk.WRITE_INTERNAL, frozenset({Role.ADMIN}),
+                                      rules=(followup_rule,), owner_check=lambda ctx, a: self._ticket_or_none(a.ticket_id) is not None,
+                                      summarize_args=lambda a: f"ticket={a.ticket_id}, len={len(a.question)}"),
             "set_ticket_status": ToolSpec("set_ticket_status", StatusArgs, set_status, Risk.STATE_CHANGE, STAFF,
                                           rules=(status_rule,), owner_check=self._can_modify, verify=status_verify,
                                           summarize_args=lambda a: f"ticket={a.ticket_id}, to={a.to_status}"),
@@ -308,6 +335,11 @@ class Toolbox:
         return ToolRun("ok", tool, facts_text=render_facts(tool, data), source_id=f"tool:{tool}:{ref}", data=data)
 
     # ------------------------------------------------------------------ 写操作（人工批准后由确定性代码执行）
+    def resolve_ticket(self, reviewer: Principal, run_id: str, ticket_id: str) -> CallOutcome:
+        """对外发送成功之后把工单置为已解决。同样经网关：批准 + 状态机规则 + 审计。"""
+        return self.propose_and_approve(reviewer, reviewer, run_id, ticket_id, "set_ticket_status",
+                                        {"ticket_id": ticket_id, "to_status": "resolved", "reason": "已回复客户"})
+
     def propose_and_approve(self, requester: Principal, approver: Principal, run_id: str, ticket_id: str,
                             tool: str, args: dict[str, Any]) -> CallOutcome:
         """提议并立即用人工审核的结果批准。STATE_CHANGE 到此为止已执行；EXTERNAL_SEND 返回 NeedsApproval(stage=confirm)。"""

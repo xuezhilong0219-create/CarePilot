@@ -38,6 +38,13 @@ class Triage(BaseModel):
     product_edition: str | None = Field(None, description="产品版本，如 企业版、极速版")
     error_text: str | None = Field(None, description="客户贴出的报错原文，逐字保留，不要改写")
     fault_description: str | None = Field(None, description="问题现象的一句话概括")
+    standalone_question: str | None = Field(
+        None,
+        description=(
+            "把客户本句话改写成脱离上下文也能看懂的完整问题：对话历史里已经出现过的对象，要把「它」「这个」「刚才那个」换成具体名称。"
+            "没有对话历史，或本句本身已经完整时，原样复述客户消息"
+        ),
+    )
     is_vague: bool = Field(
         False,
         description=(
@@ -73,6 +80,11 @@ class ToolPlan(BaseModel):
 class TicketState(TypedDict, total=False):
     ticket_id: str
     customer_message: str
+    # 运行上下文（接入工具箱时由 API 提供）
+    run_id: str
+    principal: dict  # {"user_id", "role", "shop_ids"}；发起这次运行的调用者，只读工具按它的店铺范围查询
+    history: list[dict]  # 本工单之前的公开对话 [{"role": "customer"|"agent", "text": ...}]，最近几条
+    slots: dict  # 之前几轮累积的槽位（平台/店铺/功能/仓库/版本），本轮分诊后会合并
     # 分类
     triage: dict
     missing_fields: list[str]
@@ -80,13 +92,16 @@ class TicketState(TypedDict, total=False):
     query: str
     hits: list[dict]
     shop_status: dict
+    tool_run: dict
     draft: str
     citations: list[str]
+    citation_details: list[dict]  # 结构化引用：文档名/章节/产品线/片段，供审核人点开核对
+    pending_confirmation: dict  # 对外发送已批准、等待二次确认：{"approval_id", "tool"}
     resolution: Literal["auto_reply", "escalate", "need_info"]
     escalate_reason: str
     route_to: list[str]
     # 人工审核与执行
     review: dict
     actions: list[dict]
-    status: Literal["need_info", "resolved", "escalated"]
+    status: Literal["need_info", "resolved", "escalated", "awaiting_confirmation", "action_failed"]
     followup_question: str
