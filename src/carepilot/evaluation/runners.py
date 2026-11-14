@@ -144,10 +144,13 @@ def run_pipeline(
             state.update(nodes["classify"](state))
             timings["classify_ms"] = (time.perf_counter() - t0) * 1000
 
-            if after_classify(state) == "ask_for_info":
+            route = after_classify(state)
+            if route == "ask_for_info":
                 t0 = time.perf_counter()
                 state.update(nodes["ask_for_info"](state))
                 timings["ask_for_info_ms"] = (time.perf_counter() - t0) * 1000
+            elif route == "route_escalation":  # data_exception：不检索不生成，直接升级
+                state.update(nodes["route_escalation"](state))
             else:
                 t0 = time.perf_counter()
                 state.update(nodes["retrieve"](state))

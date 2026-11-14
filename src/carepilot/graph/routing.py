@@ -6,10 +6,18 @@ from typing import Literal
 from .state import TicketState
 
 
-def after_classify(state: TicketState) -> Literal["ask_for_info", "retrieve"]:
-    """消息笼统（分诊模型的语义判断 is_vague）→ 检索前直接追问；否则去检索。
-    不用"缺必填槽位"做门槛：槽位抽取不可靠，旧版因此把 20% 本可回答的工单拦下来追问。"""
-    return "ask_for_info" if state["triage"].get("is_vague") else "retrieve"
+def after_classify(state: TicketState) -> Literal["ask_for_info", "route_escalation", "retrieve"]:
+    """优先级：笼统 → 追问；需要查客户具体数据 → 直接升级；其余 → 去检索。
+    - 不用"缺必填槽位"做门槛：槽位抽取不可靠，旧版因此把 20% 本可回答的工单拦下来追问。
+    - data_exception 不检索也不生成：知识库回答不了「帮我查下这笔订单」，让模型硬答只会编。
+      实测修掉引用 bug 后，不可答样本被自动放行 5/21，全是这一类，且分诊都判对了类别。
+      直接升级还省掉最贵的一次回复调用。"""
+    triage = state["triage"]
+    if triage.get("is_vague"):
+        return "ask_for_info"
+    if triage["category"] == "data_exception":
+        return "route_escalation"
+    return "retrieve"
 
 
 def after_draft(state: TicketState) -> Literal["human_review", "ask_for_info", "route_escalation"]:

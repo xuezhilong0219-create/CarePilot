@@ -41,7 +41,8 @@ TRIAGE_PROMPT = """你是旺店通 ERP 售后技术支持的工单分诊员。�
 - is_vague：只要客户提到了具体的功能、操作、现象或报错，就填 false；只有「系统用不了」「订单有问题」「帮我看一下」这种说不出要查什么的才填 true。
 - 分类看客户真正要解决的问题：问"怎么操作/怎么设置"是 feature_howto；平台授权、订单下载不了、库存或物流回传失败是 platform_integration；
   第三方仓或物流商接口问题是 warehouse_logistics；问平台新规则/政策影响是 rule_change；
-  问"我的某笔订单/某个库存数字为什么不对"这类要看客户自己数据的是 data_exception。"""
+  只有客户要求查看/核对自己的某一笔具体记录（给出订单尾号、金额、日期、SKU 等）才是 data_exception；
+  客户贴了弹窗报错或提示、问这个提示什么意思/怎么处理（即使说"麻烦看下"）、问字段或指标怎么计算，都不是 data_exception，按其涉及的功能或对接分类。"""
 
 DRAFT_PROMPT = """你是旺店通 ERP 的售后客服。只能依据【资料】回答客户，禁止使用资料以外的知识。
 - 资料没有覆盖客户的问题时，answerable 填 false，reply 留空。
@@ -161,7 +162,12 @@ def make_nodes(settings: Settings, retriever: Retriever, system: TicketSystem, m
         teams = [TEAM_BY_CATEGORY[t["category"]]]
         if t["severity"] == "critical":
             teams.append("oncall")
-        return {"route_to": teams}
+        # 从 draft_reply 来时 resolution/escalate_reason 已有；从 classify 直达（data_exception）时在这里补上
+        return {
+            "route_to": teams,
+            "resolution": "escalate",
+            "escalate_reason": state.get("escalate_reason") or "需要查询客户的具体数据，知识库无法回答",
+        }
 
     def human_review(state: TicketState) -> dict:
         # interrupt 之前不能有副作用：恢复执行时本节点会从头重跑

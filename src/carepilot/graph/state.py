@@ -24,7 +24,7 @@ class Triage(BaseModel):
             "platform_integration=电商平台对接、店铺授权、订单/库存/物流回传同步问题；"
             "warehouse_logistics=第三方仓库(WMS)或物流/电子面单对接；"
             "rule_change=平台规则或政策变更、版本更新带来的影响；"
-            "data_exception=客户自己的订单/库存/账务数据对不上，需要查数据才能回答；"
+            "data_exception=客户要求查看或核对自己的某一笔具体订单/库存数/账单（会给出订单尾号、金额、日期、SKU 等具体记录），必须查客户数据才能回答；仅仅贴了弹窗报错、问某个提示的原因或处理办法、问计算口径，不属于此类；"
             "other=闲聊、与产品无关"
         )
     )

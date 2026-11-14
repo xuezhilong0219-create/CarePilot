@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     llm_api_key: str
     llm_base_url: str
     # 分类 / 抽取用快模型，生成回复用强模型
-    llm_fast_model: str = "qwen3.8-flash"
-    llm_main_model: str = "qwen3.8-max"
+    llm_fast_model: str = "deepseek-v4.1-flash-1017"
+    llm_main_model: str = "deepseek-v4.1-flash-1017"
     llm_timeout: float = 60
     llm_max_retries: int = 2
 

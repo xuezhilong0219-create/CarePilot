@@ -75,6 +75,36 @@ def test_1d_cannot_answer_and_nothing_missing_escalates(make_env):
     assert pending and pending[0]["resolution"] == "escalate"
 
 
+def test_1e_data_exception_escalates_without_retrieval_or_draft(make_env):
+    # 「帮我查下这笔订单」知识库答不了：不检索、不调用回复模型，直接升级给数据支持团队
+    env = make_env(
+        make_triage(category="data_exception", severity="medium"),
+        make_draft(cited_ids=["1"]),  # 就算回复模型"能答"，也不应该被调用
+        hits=[make_hit()],
+    )
+    env.graph.invoke(INITIAL, CFG)
+
+    pending = _interrupts(_state(env))
+    assert pending and pending[0]["resolution"] == "escalate"
+    assert "具体数据" in pending[0]["escalate_reason"]
+    assert pending[0]["route_to"] == ["data_support_team"]
+    assert env.retriever.calls == [] and env.draft.call_count == 0
+
+    _resume(env, {"action": "approve"})
+    snap = _state(env)
+    assert snap.values["status"] == "escalated"
+    assert [a["team"] for a in snap.values["actions"]] == ["data_support_team"]
+    assert env.system.replies == []  # 没有对客户发任何自动回复
+
+
+def test_1f_vague_takes_priority_over_data_exception(make_env):
+    env = make_env(make_triage(category="data_exception", is_vague=True), make_draft(), hits=[make_hit()])
+    env.graph.invoke(INITIAL, CFG)
+
+    assert _state(env).values["status"] == "need_info"
+    assert not _interrupts(_state(env))
+
+
 def test_2_approve_sends_draft_and_resolves(make_env):
     draft = make_draft(reply="请按以下步骤重新授权：……")
     env = make_env(make_triage(feature_name="店铺授权"), draft, hits=[make_hit()])

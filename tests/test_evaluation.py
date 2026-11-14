@@ -508,3 +508,7 @@ def test_run_pipeline_follows_the_same_routing_as_the_graph():
 
     escalated = run(make_triage(category="platform_integration", platform_name="京东"), make_draft(answerable=False), [make_hit()])
     assert escalated["resolution"] == "escalate"  # 答不了且不缺：升级
+
+    direct = run(make_triage(category="data_exception"), make_draft(cited_ids=["1"]), [make_hit()])
+    assert direct["resolution"] == "escalate" and direct["n_hits"] == 0  # 需查客户数据：不检索，直接升级
+    assert "draft_ms" not in direct["timings_ms"]

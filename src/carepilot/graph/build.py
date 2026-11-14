@@ -23,7 +23,9 @@ def build_graph(
 
     g.add_edge(START, "classify")
     g.add_conditional_edges(
-        "classify", after_classify, {"ask_for_info": "ask_for_info", "retrieve": "retrieve"}
+        "classify",
+        after_classify,
+        {"ask_for_info": "ask_for_info", "route_escalation": "route_escalation", "retrieve": "retrieve"},
     )
     g.add_edge("ask_for_info", END)  # 追问后流程结束；客户补充信息后作为新一轮请求进入
     g.add_edge("retrieve", "draft_reply")
