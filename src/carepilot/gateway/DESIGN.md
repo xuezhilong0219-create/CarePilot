@@ -1,0 +1,37 @@
+# 网关执行与恢复约定
+
+`ToolGateway` 实现冻结的 `Gateway` 协议；仅使用标准库、Pydantic 和 `auth/spec`，没有模型或网络调用。
+
+## 执行顺序
+
+1. schema → rules → permission → risk；规则、权限和工具函数都收到验证后的模型。schema 强制严格类型和禁止额外字段，拒绝不记原始无效参数。
+2. 参数转 JSON 后计算 `sha1(run_id + NUL + tool + NUL + canonical_json(args))`，默认值也参加规范化。
+3. 同一个数据库的线程锁 + 操作系统文件锁覆盖预留、外部副作用、结果记账和对账。SQLite 使用 WAL、FULL synchronous、30 秒 busy_timeout；每个连接独立创建和关闭。
+4. `BEGIN IMMEDIATE` 中 `INSERT OR IGNORE` 预留 `started`，保存恢复参数，并写 `execution_intent`；这整个事务成功提交后才调用工具。审计写失败向上抛出，预留一起回滚，不执行工具。
+5. 工具成功后，在一个事务里写账本 `done`、结果、审批完成状态和 `executed` 审计。此时审计失败会回滚完成记账，保留已提交的 `started` 和意图，重启后对账。
+6. STATE_CHANGE 的 `approved` 状态和预留在同一事务；EXTERNAL_SEND 先持久化批准，再确认执行。重复确认走账本回放，不执行第二次。批准、确认、拒绝都重新检查操作者的工具角色和 owner_check；不重新运行业务规则。
+
+一条成功调用可能有意图和完成两条审计，不能用日志行数代替调用数；被拦截调用只有一条拒绝审计。`gate/code` 表明拒绝位置，`actor_id` 表示当前操作者，`approver_id` 保留批准人；用 `run_id/ticket_id/idem_key` 串联。
+
+## 恢复
+
+`reconcile()` 取得同一文件锁后扫描 started；因此不会对仍在执行的工具做对账。`verify` 是只读检查：结果字典（包括空字典）表示副作用已存在，None 才表示确定没有副作用。前者记 done 并认领，后者记 abandoned 允许原键重试；异常、工具缺失或没有 verify 一律人工处理。
+
+账本 status 只用冻结任务规定的 started/done/abandoned；`needs_manual` 放 `action_inputs.recovery_status`，返回列表也包含该值。直接重放 started 返回 `reconciliation_required`，须显式 reconcile；没有 verify 的动作始终保持 started 并拒绝自动重试。
+
+测试用 `CAREPILOT_CRASH_AT=before_effect|after_effect` 和 `CAREPILOT_CRASH_MARKER` 控制钩子；生产默认空操作，部署时应清理这两个环境变量。Windows 测试使用真正的 `Popen.kill()`（TerminateProcess），不是模拟异常或 Linux SIGKILL。
+
+## 集成边界与现存风险
+
+- **外部 exactly-once 有前提**：verify 必须能以 idem_key 可靠判断最终副作用；若下游仍在异步提交或 verify 读到陈旧状态，None 后重试仍可能重复。应把 idem_key 传给下游唯一约束；工具「先完成副作用再抛异常」按任务要求记 abandoned，也可能在重试时重复。
+- **吞吐与卡住风险**：最简单的数据库级文件锁使全部工具串行；工具或 verify 卡住会阻塞该数据库所有写调用，RunGuard 只能在节点前检查，不能抢占同步工具。工具必须自带超时，且不能递归调用同一网关。
+- **存储含敏感数据**：审批和恢复需要完整参数，action_inputs/approvals/action_ledger 可能存明文；审计只写 summarize_args、截断结果并兜底屏蔽大陆手机号，其他敏感字段必须由工具自行脱敏，当前没有加密、访问控制或保留期清理。
+- **权限和业务一致性**：身份来自模拟 header；审批不重跑业务规则，工具自身必须在业务事务里防止过期状态迁移。run_id 必须可信且绑定工单/用户，幂等键按冻结算法不含 actor_id 或 ticket_id。
+- **部署与人工恢复**：文件锁依赖本机文件系统，同一个库不能通过不同硬链接或不可靠网络共享访问；无 verify 的 started 需要运维人工对账，当前没有解锁管理 API。
+- **生命周期限制**：冻结接口未定义 TTL；支持拒绝已标 expired 的记录，但不自动过期；已 rejected/expired 的原键不会生成新审批，需要新 run_id。没有 schema 迁移、审计防篡改、日志轮转。
+
+## 验收证据
+
+`tests/gateway/` 覆盖四道闸、恶意模型 10 次提议、六次调用链回溯、手机号全表检查、审计前后失败、50 轮双线程 Barrier、四个独立进程、两处真实强杀和审批动作恢复。`uv run python -W ignore tests/gateway/check_mutations.py` 会逐一实际改坏五处源代码，要求对应测试失败后逐字节恢复；不能和其他测试并行运行。
+
+RunGuard 独立于网关，由图集成层在节点/工具前调用；BudgetExceeded.reason 供集成层转人工，模块自身不写工单或调用模型。
