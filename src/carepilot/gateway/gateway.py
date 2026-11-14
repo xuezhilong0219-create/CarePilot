@@ -33,9 +33,18 @@ def _principal(raw: str) -> Principal:
 
 
 class ToolGateway:
-    def __init__(self, db_path: str | Path, registry: Mapping[str, ToolSpec], *, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        db_path: str | Path,
+        registry: Mapping[str, ToolSpec],
+        *,
+        clock: Callable[[], float] = time.time,
+        approval_ttl_s: float | None = 86400.0,
+    ):
         self.registry = dict(registry)
         self.clock = clock
+        # 待批准、以及"已批准待二次确认"的审批超过这个时长就作废（从上一个阶段的时间起算）；None 表示永不过期
+        self.approval_ttl_s = approval_ttl_s
         self.ledger = Ledger(db_path)
         self._audit = AuditLog(self.ledger)
         with self.ledger.exclusive(), self.ledger.connect() as db:
@@ -127,6 +136,10 @@ class ToolGateway:
                     VALUES (?,?,?,?,?,?,?,?,'pending',?,?)""",
                     (uuid4().hex, key, ctx.run_id, ctx.ticket_id, tool, canonical_json(params), _principal_json(ctx.principal), int(spec.risk), now, now))
                 row = db.execute("SELECT * FROM approvals WHERE idem_key=?", (key,)).fetchone()
+                if row["status"] == "expired":
+                    # 过期的提议在同一个 run 里重新提出时重新打开，否则同样的动作会被永久卡死
+                    db.execute("UPDATE approvals SET status='pending', approver_id=NULL, updated_at=? WHERE idem_key=?", (now, key))
+                    row = db.execute("SELECT * FROM approvals WHERE idem_key=?", (key,)).fetchone()
                 self._event(db, ctx, tool, summary, "needs_approval", code="approval_required")
             stage = "confirm" if row["risk"] == Risk.EXTERNAL_SEND and row["status"] in ("approved", "confirmed") else "approve"
             return NeedsApproval(row["approval_id"], tool, {"args_summary": summary}, stage)
@@ -159,26 +172,68 @@ class ToolGateway:
                 self._event(db, ctx, tool, summary, "approved", code="approval_granted", approver_id=approver_id)
             self._event(db, ctx, tool, summary, "approved", code="execution_intent", approver_id=approver_id)
         _crash_point("before_effect")
+        exec_code = ""
         try:
             result = spec.fn(ctx, args)
             if not isinstance(result, dict):
                 raise TypeError("tool result must be a dict")
             result_json = canonical_json(result)
         except Exception as exc:
-            with self.ledger.transaction() as db:
-                db.execute("UPDATE action_ledger SET status='abandoned', updated_at=? WHERE idem_key=?", (self.clock(), ctx.idem_key))
-                if grant_approval:
-                    db.execute("UPDATE approvals SET status='pending', updated_at=? WHERE approval_id=?", (self.clock(), approval_id))
-                self._event(db, ctx, tool, summary, "rejected", code="tool_error", result=type(exc).__name__, approver_id=approver_id)
-            return Rejected(Gate.RISK, "tool_error", type(exc).__name__)
+            # 工具抛异常 ≠ 副作用没发生（请求发出后连接被重置就是典型）。直接标"可重试"会重复执行，所以先核实。
+            adopted, unresolved_manual = self._check_effect_after_error(ctx, spec, args)
+            if adopted is not None:
+                result, result_json, exec_code = adopted, canonical_json(adopted), "adopted_after_error"
+            elif adopted is None and unresolved_manual is not None:
+                # 无法确认副作用有没有发生：保持 started，不自动重试。无 verify → 需人工；verify 自己出错 → 留给 reconcile 再核实
+                with self.ledger.transaction() as db:
+                    if unresolved_manual:
+                        db.execute("UPDATE action_inputs SET recovery_status='needs_manual' WHERE idem_key=?", (ctx.idem_key,))
+                    self._event(db, ctx, tool, summary, "rejected", code="tool_error_unverified", result=type(exc).__name__, approver_id=approver_id)
+                return Rejected(Gate.RISK, "tool_error_unverified", type(exc).__name__)
+            else:
+                with self.ledger.transaction() as db:
+                    db.execute("UPDATE action_ledger SET status='abandoned', updated_at=? WHERE idem_key=?", (self.clock(), ctx.idem_key))
+                    if grant_approval:
+                        db.execute("UPDATE approvals SET status='pending', updated_at=? WHERE approval_id=?", (self.clock(), approval_id))
+                    self._event(db, ctx, tool, summary, "rejected", code="tool_error", result=type(exc).__name__, approver_id=approver_id)
+                return Rejected(Gate.RISK, "tool_error", type(exc).__name__)
         _crash_point("after_effect")
         with self.ledger.transaction() as db:
             db.execute("UPDATE action_ledger SET status='done', result_json=?, updated_at=? WHERE idem_key=?", (result_json, self.clock(), ctx.idem_key))
             if approval_id:
                 status = "confirmed" if spec.risk == Risk.EXTERNAL_SEND else "executed"
                 db.execute("UPDATE approvals SET status=?, updated_at=? WHERE approval_id=?", (status, self.clock(), approval_id))
-            self._event(db, ctx, tool, summary, "executed", result=result, approver_id=approver_id)
+            self._event(db, ctx, tool, summary, "executed", code=exec_code, result=result, approver_id=approver_id)
         return Executed(result)
+
+    @staticmethod
+    def _check_effect_after_error(ctx: ToolContext, spec: ToolSpec, args: BaseModel) -> tuple[dict | None, bool | None]:
+        """工具抛异常后核实副作用。返回 (已发生时的结果, 是否需要保持未决)：
+        (dict, None)   verify 确认副作用已发生 → 认领结果，不重试；
+        (None, None)   确认没发生，或这是没有 verify 的只读/内部写工具 → 允许重试；
+        (None, True)   有副作用但没有 verify → 无法确认，需人工；
+        (None, False)  verify 自己出错 → 无法确认，留给 reconcile。"""
+        if spec.verify is None:
+            return (None, True) if spec.risk >= Risk.STATE_CHANGE else (None, None)
+        try:
+            found = spec.verify(ctx, args)
+            if found is not None:
+                if not isinstance(found, dict):
+                    raise TypeError("verify result must be a dict")
+                canonical_json(found)
+            return found, None
+        except Exception:
+            return None, False
+
+    def _expired(self, row: sqlite3.Row) -> bool:
+        return self.approval_ttl_s is not None and self.clock() - row["updated_at"] > self.approval_ttl_s
+
+    def _expire(self, ctx: ToolContext, row: sqlite3.Row, approver: Principal) -> Rejected:
+        with self.ledger.transaction() as db:
+            db.execute("UPDATE approvals SET status='expired', updated_at=? WHERE approval_id=?", (self.clock(), row["approval_id"]))
+            self._event(db, ctx, row["tool"], "[approval]", "rejected", gate=Gate.RISK, code="approval_expired",
+                        result="approval expired", approver_id=approver.user_id)
+        return Rejected(Gate.RISK, "approval_expired", "approval expired")
 
     @staticmethod
     def _approval_context(row: sqlite3.Row, principal: Principal | None = None) -> ToolContext:
@@ -216,6 +271,8 @@ class ToolGateway:
             ctx = self._approval_context(row, approver)
             if row["status"] != "pending":
                 return self._reject(ctx, row["tool"], "[approval]", Gate.RISK, "approval_not_pending", approver_id=approver.user_id)
+            if self._expired(row):
+                return self._expire(ctx, row, approver)
             inputs = self._approved_inputs(row, approver)
             if isinstance(inputs, Rejected):
                 return inputs
@@ -237,6 +294,8 @@ class ToolGateway:
                 return self._reject(ctx, row["tool"], "[approval]", Gate.RISK, "confirmation_not_required", approver_id=approver.user_id)
             if row["status"] not in ("approved", "confirmed"):
                 return self._reject(ctx, row["tool"], "[approval]", Gate.RISK, "approval_not_approved", approver_id=approver.user_id)
+            if row["status"] == "approved" and self._expired(row):  # 已确认的是回放，不受过期影响
+                return self._expire(ctx, row, approver)
             inputs = self._approved_inputs(row, approver)
             if isinstance(inputs, Rejected):
                 return inputs
