@@ -12,6 +12,8 @@ dependencies = [
     "uvicorn[standard]",
     "pydantic-settings",
     "jieba>=0.42.1",
+    "fastembed>=0.9.1",
+    "numpy>=2.4.6",
 ]
 
 [dependency-groups]

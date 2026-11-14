@@ -7,3 +7,9 @@ __pycache__/
 data/raw/
 *.sqlite
 *.db
+# 真实知识库及其衍生物（清洗结果、索引、评估集、报告）含内部资料，不入库
+data/kb_real/
+data/index/
+eval/real/
+.worktrees/
+data/models/

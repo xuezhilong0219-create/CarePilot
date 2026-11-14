@@ -1,5 +1,9 @@
-from langchain_core.messages import HumanMessage, SystemMessage
+from dataclasses import dataclass
+from typing import Protocol
+
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
+from pydantic import BaseModel
 
 from ..config import Settings
 from ..llm import StructuredLLM, get_llm
@@ -9,42 +13,71 @@ from .state import DraftResult, TicketState, Triage
 
 # 每类工单必须具备的信息；缺了就追问，而不是让模型硬猜。放在代码里是为了行为可预期、可测试。
 REQUIRED_FIELDS: dict[str, list[str]] = {
-    "hardware_fault": ["product_model", "fault_description"],
-    "software_issue": ["product_model", "fault_description"],
-    "warranty_repair": ["product_model", "serial_number"],
-    "logistics": ["order_id"],
-    "billing": ["order_id"],
+    "feature_howto": ["feature_name"],
+    "platform_integration": ["platform_name"],
+    "warehouse_logistics": ["partner_name"],
+    "rule_change": ["platform_name"],
+    "data_exception": ["fault_description"],
     "other": [],
 }
 FIELD_LABELS = {
-    "product_model": "产品型号",
-    "fault_description": "故障现象",
-    "serial_number": "设备序列号",
-    "order_id": "订单号",
+    "feature_name": "具体是哪个功能或菜单",
+    "platform_name": "电商平台名称",
+    "partner_name": "仓库或物流商名称",
+    "fault_description": "问题现象",
 }
 TEAM_BY_CATEGORY = {
-    "hardware_fault": "hardware_team",
-    "software_issue": "software_team",
-    "warranty_repair": "rma_team",
-    "logistics": "logistics_team",
-    "billing": "finance_team",
+    "feature_howto": "product_support_team",
+    "platform_integration": "platform_integration_team",
+    "warehouse_logistics": "warehouse_logistics_team",
+    "rule_change": "platform_integration_team",
+    "data_exception": "data_support_team",
     "other": "tier2_support",
 }
 
-TRIAGE_PROMPT = "你是售后工单分诊员。阅读客户消息，抽取结构化信息。客户没提到的字段必须填 null，禁止猜测。"
-DRAFT_PROMPT = """你是售后客服。只能依据【资料】回答客户，禁止使用资料以外的知识。
+TRIAGE_PROMPT = """你是旺店通 ERP 售后技术支持的工单分诊员。阅读客户消息，抽取结构化信息。
+- 客户没提到的字段必须填 null，禁止猜测；error_text 必须逐字摘录客户贴的报错原文。
+- 分类看客户真正要解决的问题：问"怎么操作/怎么设置"是 feature_howto；平台授权、订单下载不了、库存或物流回传失败是 platform_integration；
+  第三方仓或物流商接口问题是 warehouse_logistics；问平台新规则/政策影响是 rule_change；
+  问"我的某笔订单/某个库存数字为什么不对"这类要看客户自己数据的是 data_exception。"""
+
+DRAFT_PROMPT = """你是旺店通 ERP 的售后客服。只能依据【资料】回答客户，禁止使用资料以外的知识。
 - 资料没有覆盖客户的问题时，answerable 填 false，reply 留空。
-- 回复要具体、可操作、语气礼貌；用到哪条资料就把它的编号写进 cited_ids。"""
+- 资料可能来自不同产品版本（企业版/极速版等）或较早的版本；若资料适用的版本与客户不一致，要在回复里说明。
+- 回复要具体、可操作、分步骤，语气礼貌；用到哪条资料就把它的编号写进 cited_ids。"""
 
 
-def make_nodes(settings: Settings, retriever: Retriever, system: TicketSystem):
-    fast = get_llm(settings, "fast")
-    main = get_llm(settings, "main")
-    triage_llm = StructuredLLM(fast, Triage)
-    draft_llm = StructuredLLM(main, DraftResult)
+class StructuredInvoker(Protocol):
+    def invoke(self, messages: list[BaseMessage]) -> BaseModel: ...
+
+
+@dataclass
+class Models:
+    """图里用到的两个结构化模型。单测里换成假实现，评估时可以单独替换某一个。"""
+
+    triage: StructuredInvoker
+    draft: StructuredInvoker
+
+
+def default_models(settings: Settings) -> Models:
+    return Models(
+        triage=StructuredLLM(get_llm(settings, "fast"), Triage),
+        draft=StructuredLLM(get_llm(settings, "main"), DraftResult),
+    )
+
+
+def build_query(triage: dict, customer_message: str) -> str:
+    """拼检索词。客户习惯直接拿报错原文、平台名、功能名搜，所以把抽取出的实体放在最前面，
+    再附上客户原话兜底。是纯函数，评估脚本复用它，保证评估的检索词和线上一致。"""
+    parts = [triage.get(k) for k in ("platform_name", "feature_name", "partner_name", "error_text")]
+    return " ".join([p for p in parts if p] + [customer_message])
+
+
+def make_nodes(settings: Settings, retriever: Retriever, system: TicketSystem, models: Models | None = None):
+    models = models or default_models(settings)
 
     def classify(state: TicketState) -> dict:
-        triage: Triage = triage_llm.invoke(
+        triage: Triage = models.triage.invoke(
             [SystemMessage(TRIAGE_PROMPT), HumanMessage(state["customer_message"])]
         )
         data = triage.model_dump()
@@ -58,21 +91,25 @@ def make_nodes(settings: Settings, retriever: Retriever, system: TicketSystem):
 
     def retrieve(state: TicketState) -> dict:
         t = state["triage"]
-        query = " ".join(filter(None, [t.get("product_model"), t.get("fault_description"), state["customer_message"]]))
+        query = build_query(t, state["customer_message"])
         hits = retriever.search(query, k=settings.retrieval_top_k)
         out: dict = {
-            "hits": [{"id": h.chunk.id, "title": h.chunk.title, "text": h.chunk.text, "score": round(h.score, 3)} for h in hits]
+            "query": query,
+            "hits": [
+                {"id": h.chunk.id, "title": h.chunk.title, "text": h.chunk.text, "score": round(h.score, 3)}
+                for h in hits
+            ],
         }
-        if t.get("serial_number"):
-            out["warranty"] = system.lookup_warranty(t["serial_number"])
+        if t["category"] == "platform_integration" and t.get("platform_name") and t.get("shop_name"):
+            out["shop_status"] = system.check_shop_auth(t["platform_name"], t["shop_name"])
         return out
 
     def draft_reply(state: TicketState) -> dict:
         if not state["hits"]:
             return {"resolution": "escalate", "escalate_reason": "知识库无相关资料"}
         context = "\n\n".join(f"[{h['id']}] {h['text']}" for h in state["hits"])
-        extra = f"\n\n【保修查询结果】{state['warranty']}" if state.get("warranty") else ""
-        result: DraftResult = draft_llm.invoke(
+        extra = f"\n\n【店铺授权状态】{state['shop_status']}" if state.get("shop_status") else ""
+        result: DraftResult = models.draft.invoke(
             [
                 SystemMessage(DRAFT_PROMPT),
                 HumanMessage(f"【资料】\n{context}{extra}\n\n【客户消息】\n{state['customer_message']}"),

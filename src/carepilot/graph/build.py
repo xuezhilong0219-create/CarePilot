@@ -4,7 +4,7 @@ from langgraph.graph import END, START, StateGraph
 from ..config import Settings
 from ..retrieval.base import Retriever
 from ..tools import TicketSystem
-from .nodes import make_nodes
+from .nodes import Models, make_nodes
 from .state import TicketState
 
 
@@ -13,8 +13,9 @@ def build_graph(
     retriever: Retriever,
     system: TicketSystem,
     checkpointer: BaseCheckpointSaver,
+    models: Models | None = None,
 ):
-    n = make_nodes(settings, retriever, system)
+    n = make_nodes(settings, retriever, system, models)
     g = StateGraph(TicketState)
     for name, fn in n.items():
         g.add_node(name, fn)

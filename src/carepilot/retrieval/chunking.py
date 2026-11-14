@@ -31,7 +31,9 @@ def split_markdown(doc_name: str, text: str, max_chars: int = 600) -> list[Chunk
         if buf:
             pieces.append(buf)
         for piece in pieces:
-            chunks.append(Chunk(id=f"{doc_name}#{len(chunks)}", title=title, text=f"{title}\n{piece}"))
+            chunks.append(
+                Chunk(id=f"{doc_name}#{len(chunks)}", title=title, text=f"{title}\n{piece}", doc_id=doc_name)
+            )
     return chunks
 
 
