@@ -545,16 +545,10 @@ def test_audit_limit_zero_and_huge_are_clean(work_dir):
         assert isinstance(rows, list)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "audit(limit=-1) 抛未捕获的 ValueError('limit must be nonnegative')；"
-        "按任务要求，负分页参数应被钳到 0 返回空列表（或至少不把参数错误抛给调用方）"
-    ),
-)
+# 回归：黑盒测试发现 audit(limit=-1) 抛 ValueError（最初是严格 xfail），修复为钳到 0 返回空列表
 def test_audit_limit_negative_does_not_crash(work_dir):
     tools = make_tools()
     gw = new_gateway(work_dir, tools)
     gw.call(ctx_for(principal(Role.AGENT)), "read", {"q": "x"})
     rows = gw.audit(limit=-1)
-    assert isinstance(rows, list)
+    assert rows == []  # 不能因为 SQLite 的 LIMIT -1 = 不限条数，就把整张审计表倒出来

@@ -36,8 +36,8 @@ class AuditLog:
 
     def query(self, *, run_id: str | None = None, ticket_id: str | None = None,
               actor_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-        if limit < 0:
-            raise ValueError("limit must be nonnegative")
+        # 负数不能原样交给 SQLite：LIMIT -1 的含义是"不限条数"，会把整张审计表倒出来。钳到 0，返回空列表。
+        limit = max(0, int(limit))
         filters = {key: value for key, value in {"run_id": run_id, "ticket_id": ticket_id, "actor_id": actor_id}.items() if value is not None}
         where = " AND ".join(f"{field}=?" for field in filters) or "1"
         with self.ledger.connect() as db:
