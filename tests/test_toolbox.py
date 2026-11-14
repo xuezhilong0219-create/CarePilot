@@ -211,3 +211,17 @@ def test_same_run_cannot_replay_another_principals_cached_result(env):
     env.tb.run_plan(C1, "shared", None, plan("query_ticket", ticket_id=t.ticket_id), source_text=t.ticket_id)
     leaked = env.tb.run_plan(A1, "shared", None, plan("query_ticket", ticket_id=t.ticket_id), source_text=t.ticket_id)
     assert leaked.outcome == "error" and leaked.detail == "principal_mismatch" and leaked.data == {}
+
+
+def test_shop_auth_by_name_resolves_inside_the_callers_scope_only(env):
+    mine = next(s for s in env.world.shops.values() if s.shop_id == "S1")
+    foreign = next(s for s in env.world.shops.values() if s.shop_id == "S3")
+    ok = env.tb.run_plan(C1, "n1", None, plan("query_shop_auth", shop_name=mine.name), source_text=f"帮我查下 {mine.name} 的授权")
+    assert ok.outcome == "ok" and mine.name in ok.facts_text
+    other = env.tb.run_plan(C1, "n2", None, plan("query_shop_auth", shop_name=foreign.name), source_text=foreign.name)
+    ghost = env.tb.run_plan(C1, "n3", None, plan("query_shop_auth", shop_name="根本没有的店"), source_text="根本没有的店")
+    assert other.outcome == ghost.outcome == "not_found" and other.data == ghost.data  # 别家店铺和不存在不可区分
+    made_up = env.tb.run_plan(C1, "n4", None, plan("query_shop_auth", shop_name=mine.name), source_text="我的店授权怎么样")
+    assert made_up.outcome == "invalid"  # 名称不是客户说过的：不执行
+    assert env.tb.run_plan(A1, "n5", None, plan("query_shop_auth", shop_name=foreign.name), source_text=foreign.name).outcome == "ok"
+    assert env.tb.resolve_shop(C1, foreign.name) is None and env.tb.resolve_shop(A1, foreign.name) == "S3"

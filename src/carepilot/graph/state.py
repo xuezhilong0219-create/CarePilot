@@ -74,6 +74,7 @@ class ToolPlan(BaseModel):
     )
     order_id: str | None = Field(None, description="客户消息里逐字出现的完整订单号；没有就填 null，不要猜、不要补全尾号")
     shop_id: str | None = Field(None, description="客户消息里逐字出现的店铺编号（如 S1）；没有就填 null")
+    shop_name: str | None = Field(None, description="客户消息里逐字出现的店铺名称（如『小熊数码』），查店铺授权时用；没有就填 null，不要自己编")
     ticket_id: str | None = Field(None, description="客户消息里逐字出现的工单号（如 T-000123）；没有就填 null")
 
 

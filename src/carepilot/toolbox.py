@@ -302,12 +302,26 @@ class Toolbox:
         }
 
     # ------------------------------------------------------------------ 只读工具的规划执行
+    def resolve_shop(self, principal: Principal, name: str) -> str | None:
+        """店铺名称 → 编号，只在调用者自己的店铺范围里找（客户=自己的店铺，坐席/管理员=全部）。
+        范围内找不到，和店铺根本不存在不可区分，不泄露别家店铺。名称必须唯一匹配。"""
+        scope = frozenset(self.world.shops) if principal.is_staff else frozenset(principal.shop_ids)
+        hits = [s.shop_id for s in self.world.shops.values() if s.shop_id in scope and s.name == name.strip()]
+        return hits[0] if len(hits) == 1 else None
+
     _PLAN_ARG = {"query_order": "order_id", "query_shipment": "order_id", "query_shop_auth": "shop_id", "query_ticket": "ticket_id"}
 
     def run_plan(self, principal: Principal, run_id: str, ticket_id: str | None, plan: ToolPlan, *, source_text: str) -> ToolRun:
         """执行 planner 提议的一次只读调用。参数必须逐字出现在 source_text（客户消息+历史）里，否则当成缺参。"""
         if plan.tool == "none":
             return ToolRun("none")
+        if plan.tool == "query_shop_auth" and not plan.shop_id and plan.shop_name:
+            if plan.shop_name not in source_text:  # 名称同样必须是客户说过的
+                return ToolRun("invalid", plan.tool, detail="shop_id")
+            shop_id = self.resolve_shop(principal, plan.shop_name)
+            if shop_id is None:
+                return ToolRun("not_found", plan.tool, data={"found": False})
+            plan, source_text = plan.model_copy(update={"shop_id": shop_id}), f"{source_text} {shop_id}"  # 编号由确定性代码派生
         arg_name = self._PLAN_ARG[plan.tool]
         value = getattr(plan, arg_name)
         if not value or str(value) not in source_text:
