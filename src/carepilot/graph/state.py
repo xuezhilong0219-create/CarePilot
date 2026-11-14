@@ -55,6 +55,21 @@ class DraftResult(BaseModel):
     cited_ids: list[str] = Field(default_factory=list, description="回复所依据资料的编号：资料前方括号里的数字，如 [\"1\", \"3\"]")
 
 
+class ToolPlan(BaseModel):
+    """工具规划节点的结构化输出：从客户消息里决定调用哪个只读查询工具。只填客户消息里逐字出现的标识符。"""
+
+    tool: Literal["query_order", "query_shipment", "query_shop_auth", "query_ticket", "none"] = Field(
+        description=(
+            "query_order=按订单号查订单状态/金额；query_shipment=按订单号查物流到哪了；"
+            "query_shop_auth=查某个店铺的授权是否过期（店铺编号形如 S1）；query_ticket=按工单号（形如 T-000123）查工单进度；"
+            "none=这些工具都帮不上（比如问账单为什么少了钱、库存数字对不上）"
+        )
+    )
+    order_id: str | None = Field(None, description="客户消息里逐字出现的完整订单号；没有就填 null，不要猜、不要补全尾号")
+    shop_id: str | None = Field(None, description="客户消息里逐字出现的店铺编号（如 S1）；没有就填 null")
+    ticket_id: str | None = Field(None, description="客户消息里逐字出现的工单号（如 T-000123）；没有就填 null")
+
+
 class TicketState(TypedDict, total=False):
     ticket_id: str
     customer_message: str

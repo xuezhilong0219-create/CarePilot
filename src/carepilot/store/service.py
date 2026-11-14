@@ -1,6 +1,7 @@
 """SQLite 工单存储。每个操作独立连接，配合 WAL + busy_timeout 支持多线程。
 写状态用 `UPDATE ... WHERE version=?` 做乐观锁，认领用 `WHERE owner_id IS NULL` 保证原子。"""
 
+import json
 import sqlite3
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -72,6 +73,12 @@ CREATE TABLE IF NOT EXISTS ticket_events (
     from_status TEXT,
     to_status TEXT,
     detail TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS ticket_context (
+    ticket_id TEXT PRIMARY KEY,
+    slots_json TEXT NOT NULL DEFAULT '{}',
+    last_thread_id TEXT,
+    updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tickets_customer ON tickets(customer_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
@@ -420,6 +427,40 @@ class TicketStore:
                 (ticket_id, now, who.user_id, "priority_changed", ticket.status, ticket.status,
                  f"{ticket.priority}->{priority}"),
             )
+            return self._fetch_ticket(conn, ticket_id)
+
+    def find_message_by_idem_key(self, idem_key: str) -> Message | None:
+        """按幂等键找消息，供网关崩溃恢复时核实"这条消息到底有没有发出去"。"""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM ticket_messages WHERE idem_key=?", (idem_key,)).fetchone()
+        return _message(row) if row else None
+
+    def get_context(self, ticket_id: str) -> dict:
+        """工单级会话上下文：跨轮累积的槽位（平台/店铺/功能/仓库…）和最近一次运行的 thread_id。"""
+        with self._connect() as conn:
+            self._fetch_ticket(conn, ticket_id)
+            row = conn.execute("SELECT * FROM ticket_context WHERE ticket_id=?", (ticket_id,)).fetchone()
+        if row is None:
+            return {"slots": {}, "last_thread_id": None}
+        return {"slots": json.loads(row["slots_json"]), "last_thread_id": row["last_thread_id"]}
+
+    def put_context(self, ticket_id: str, *, slots: dict, last_thread_id: str | None) -> None:
+        with self._connect() as conn:
+            self._fetch_ticket(conn, ticket_id)
+            conn.execute(
+                "INSERT INTO ticket_context(ticket_id, slots_json, last_thread_id, updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(ticket_id) DO UPDATE SET slots_json=excluded.slots_json, "
+                "last_thread_id=excluded.last_thread_id, updated_at=excluded.updated_at",
+                (ticket_id, json.dumps(slots, ensure_ascii=False, sort_keys=True), last_thread_id, self._now()),
+            )
+
+    def set_category(self, who: Principal, ticket_id: str, category: str) -> Ticket:
+        """分诊结果回写。只有坐席/管理员（含服务端的 system 主体）可以写。"""
+        if not is_staff(who):
+            raise Forbidden("只有坐席或管理员能修改工单分类")
+        with self._connect() as conn:
+            self._fetch_ticket(conn, ticket_id)
+            conn.execute("UPDATE tickets SET category=?, updated_at=? WHERE ticket_id=?", (category, self._now(), ticket_id))
             return self._fetch_ticket(conn, ticket_id)
 
     def sla_remaining_seconds(self, ticket: Ticket, now: float | None = None) -> float:

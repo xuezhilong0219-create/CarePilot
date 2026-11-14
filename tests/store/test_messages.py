@@ -1,7 +1,7 @@
 import pytest
 
 from carepilot.auth import Principal
-from carepilot.store import Forbidden, TicketStore
+from carepilot.store import Forbidden, NotFound, TicketStore
 
 from conftest import make_ticket
 
@@ -78,3 +78,25 @@ def test_unclaimed_ticket_agent_must_claim_before_public_message(store: TicketSt
         store.add_message(ticket.ticket_id, author=a1, kind="message", body="未认领就回复")
     store.claim(a1, ticket.ticket_id)
     store.add_message(ticket.ticket_id, author=a1, kind="message", body="认领后回复")
+
+
+def test_find_message_by_idem_key(store: TicketStore, c1: Principal, a1: Principal):
+    ticket = make_ticket(store, c1)
+    store.claim(a1, ticket.ticket_id)
+    msg = store.add_message(ticket.ticket_id, author=a1, kind="message", body="已处理", idem_key="run-9:send")
+    assert store.find_message_by_idem_key("run-9:send").id == msg.id
+    assert store.find_message_by_idem_key("nope") is None
+
+
+def test_ticket_context_roundtrip_and_category(store: TicketStore, c1: Principal, a1: Principal, admin: Principal):
+    ticket = make_ticket(store, c1)
+    assert store.get_context(ticket.ticket_id) == {"slots": {}, "last_thread_id": None}
+    store.put_context(ticket.ticket_id, slots={"platform_name": "京东", "feature_name": None}, last_thread_id="th-1")
+    store.put_context(ticket.ticket_id, slots={"platform_name": "京东", "feature_name": "库存同步"}, last_thread_id="th-2")
+    assert store.get_context(ticket.ticket_id) == {
+        "slots": {"platform_name": "京东", "feature_name": "库存同步"}, "last_thread_id": "th-2"}
+    assert store.set_category(admin, ticket.ticket_id, "platform_integration").category == "platform_integration"
+    with pytest.raises(Forbidden):
+        store.set_category(c1, ticket.ticket_id, "other")
+    with pytest.raises(NotFound):
+        store.get_context("T-999999")

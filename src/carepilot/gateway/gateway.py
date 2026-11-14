@@ -154,6 +154,12 @@ class ToolGateway:
                 (ctx.idem_key, ctx.run_id, tool, now, now)).rowcount == 1
             row = db.execute("SELECT * FROM action_ledger WHERE idem_key=?", (ctx.idem_key,)).fetchone()
             if row["status"] == "done":
+                if approver_id is None and spec.risk in (Risk.READ, Risk.WRITE_INTERNAL):
+                    # 直接执行路径上调用者就是执行者：回放时必须还是同一个主体，否则等于把别人的缓存结果发给了另一个人
+                    first = db.execute("SELECT principal_json FROM action_inputs WHERE idem_key=?", (ctx.idem_key,)).fetchone()
+                    if first is not None and first["principal_json"] != _principal_json(ctx.principal):
+                        self._event(db, ctx, tool, summary, "rejected", code="principal_mismatch")
+                        return Rejected(Gate.RISK, "principal_mismatch", "principal_mismatch")
                 result = json.loads(row["result_json"])
                 self._event(db, ctx, tool, summary, "replayed", result=result, approver_id=approver_id)
                 return Executed(result, replayed=True)
