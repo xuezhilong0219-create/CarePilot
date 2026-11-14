@@ -94,7 +94,14 @@ def create_app(
     retriever: Retriever | None = None,
     system: TicketSystem | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
+    *,
+    governed: bool = False,
+    store: Any = None,
+    toolbox: Any = None,
+    chunks: Any = None,
 ) -> FastAPI:
+    """governed=False：演示模式（mock 工单系统、没有身份和权限，接口按 thread_id 访问）。
+    governed=True：治理模式（工单落库、三角色、网关、审计、多轮、二次确认），接口见 api/governed.py。"""
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         s = settings or get_settings()
@@ -110,47 +117,77 @@ def create_app(
             conn = sqlite3.connect(s.checkpoint_db, check_same_thread=False)
             cp = SqliteSaver(conn)
             cp.setup()
-        application.state.graph = build_graph(s, r, application.state.system, cp, models=models)
+        if governed:
+            from ..graph.nodes import build_edition_index
+            from ..retrieval.chunking import load_kb
+            from ..sandbox import tools as sandbox_tools
+            from ..sandbox.data import build_world
+            from ..sandbox.logistics import LogisticsClient
+            from ..store import TicketStore, seed_demo_users
+            from ..toolbox import Toolbox
+
+            st = store
+            if st is None:
+                s.tickets_db.parent.mkdir(parents=True, exist_ok=True)
+                st = TicketStore(s.tickets_db)
+                seed_demo_users(st)
+            tb = toolbox
+            if tb is None:
+                world = build_world(7)
+                logistics = LogisticsClient(lambda oid: sandbox_tools.query_shipment(world, oid))
+                tb = Toolbox(world=world, store=st, logistics=logistics, db_path=s.gateway_db)
+            kb_chunks = chunks if chunks is not None else load_kb(s.kb_dir)
+            application.state.store, application.state.toolbox = st, tb
+            application.state.chunks_by_id = {c.id: c for c in kb_chunks}
+            application.state.graph = build_graph(s, r, application.state.system, cp, models=models, toolbox=tb,
+                                                  edition_index=build_edition_index(kb_chunks))
+        else:
+            application.state.graph = build_graph(s, r, application.state.system, cp, models=models)
         yield
         if conn is not None:
             conn.close()
 
     app = FastAPI(title="CarePilot", lifespan=lifespan)
 
-    @app.post("/tickets")
-    def create_ticket(body: TicketIn, stream: bool = False):
-        thread_id = uuid.uuid4().hex
-        ticket_id = body.ticket_id or f"T-{thread_id[:6]}"
-        config = {"configurable": {"thread_id": thread_id}}
-        graph_input = {"ticket_id": ticket_id, "customer_message": body.message}
-        if stream:
-            return StreamingResponse(
-                _stream_graph(app.state.graph, graph_input, config, thread_id),
-                media_type="text/event-stream",
-                headers=_SSE_HEADERS,
-            )
-        app.state.graph.invoke(graph_input, config)
-        return _view(app.state.graph, thread_id)
+    if governed:
+        from .governed import register_governed
 
-    @app.post("/tickets/{thread_id}/review")
-    def review_ticket(thread_id: str, body: ReviewIn, stream: bool = False):
-        config = {"configurable": {"thread_id": thread_id}}
-        view = _view(app.state.graph, thread_id)
-        if view["status"] != "awaiting_review":
-            raise HTTPException(409, f"ticket is not awaiting review (status={view['status']})")
-        command = Command(resume=body.model_dump(exclude_none=True))
-        if stream:
-            return StreamingResponse(
-                _stream_graph(app.state.graph, command, config, thread_id),
-                media_type="text/event-stream",
-                headers=_SSE_HEADERS,
-            )
-        app.state.graph.invoke(command, config)
-        return _view(app.state.graph, thread_id)
+        register_governed(app)
+    else:
+        @app.post("/tickets")
+        def create_ticket(body: TicketIn, stream: bool = False):
+            thread_id = uuid.uuid4().hex
+            ticket_id = body.ticket_id or f"T-{thread_id[:6]}"
+            config = {"configurable": {"thread_id": thread_id}}
+            graph_input = {"ticket_id": ticket_id, "customer_message": body.message}
+            if stream:
+                return StreamingResponse(
+                    _stream_graph(app.state.graph, graph_input, config, thread_id),
+                    media_type="text/event-stream",
+                    headers=_SSE_HEADERS,
+                )
+            app.state.graph.invoke(graph_input, config)
+            return _view(app.state.graph, thread_id)
 
-    @app.get("/tickets/{thread_id}")
-    def get_ticket(thread_id: str):
-        return _view(app.state.graph, thread_id)
+        @app.post("/tickets/{thread_id}/review")
+        def review_ticket(thread_id: str, body: ReviewIn, stream: bool = False):
+            config = {"configurable": {"thread_id": thread_id}}
+            view = _view(app.state.graph, thread_id)
+            if view["status"] != "awaiting_review":
+                raise HTTPException(409, f"ticket is not awaiting review (status={view['status']})")
+            command = Command(resume=body.model_dump(exclude_none=True))
+            if stream:
+                return StreamingResponse(
+                    _stream_graph(app.state.graph, command, config, thread_id),
+                    media_type="text/event-stream",
+                    headers=_SSE_HEADERS,
+                )
+            app.state.graph.invoke(command, config)
+            return _view(app.state.graph, thread_id)
+
+        @app.get("/tickets/{thread_id}")
+        def get_ticket(thread_id: str):
+            return _view(app.state.graph, thread_id)
 
     @app.get("/health")
     def health():
@@ -159,4 +196,4 @@ def create_app(
     return app
 
 
-app = create_app()
+app = create_app(governed=True)
