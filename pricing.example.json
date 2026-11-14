@@ -1,0 +1,12 @@
+{
+  "_comment": "把每个模型的 input_per_mtoken / output_per_mtoken 填成当前单价（每百万 token 的价格），并填写 source（价格来源）和 as_of（取价日期）。单价为 null 表示未配置，报告只统计 token，不显示 0。给了单价但 source/as_of 为空会报错。",
+  "models": {
+    "deepseek-v4.1-flash-1017": {
+      "input_per_mtoken": null,
+      "output_per_mtoken": null
+    }
+  },
+  "currency": "CNY",
+  "source": "",
+  "as_of": ""
+}
