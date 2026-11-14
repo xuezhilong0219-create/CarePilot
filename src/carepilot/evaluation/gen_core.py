@@ -233,6 +233,24 @@ class ErrorSamplePlan:
     selected: list[tuple[ManifestEntry, str]]
 
 
+def plan_rule_samples(
+    entries: Sequence[ManifestEntry], n: int, seed: int, exclude_doc_ids: Iterable[str] = ()
+) -> SamplePlan:
+    """专门抽「平台规则变更通知」类文档。sqrt 分层按目录抽，通知类只占很小的比例（实测 224 条里只有 2 条），
+    而它是知识库的四类内容之一，不专门补的话这一类的指标没有统计意义。"""
+    excluded = set(exclude_doc_ids)
+    docs = sorted(
+        (
+            e
+            for e in candidate_docs(entries)
+            if category_for(e.top_dir, e.title) == "rule_change" and e.doc_id not in excluded
+        ),
+        key=lambda e: e.doc_id,
+    )
+    random.Random(f"{seed}:rule").shuffle(docs)
+    return SamplePlan(quotas={"rule_change": min(n, len(docs))}, selected=docs[:n], backups=docs[n:])
+
+
 def plan_error_samples(
     entries: Sequence[ManifestEntry],
     kb_dir: Path,

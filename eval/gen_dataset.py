@@ -21,6 +21,7 @@ from carepilot.evaluation.gen_core import (  # noqa: E402
     build_error_prompt,
     load_manifest,
     plan_error_samples,
+    plan_rule_samples,
     plan_samples,
     read_doc,
     run_answerables,
@@ -39,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-unanswerable", type=int, default=30)
     parser.add_argument(
         "--n-error", type=int, default=0, help="额外生成多少条带报错原文的样本（默认 0，不影响原有输出）"
+    )
+    parser.add_argument(
+        "--n-rule", type=int, default=0, help="额外生成多少条「平台规则变更通知」类样本（默认 0，不影响原有输出）"
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", type=Path, default=Path("eval/real/dataset.jsonl"))
@@ -127,6 +131,12 @@ def main(argv: list[str] | None = None) -> int:
             args.seed,
             exclude_doc_ids={e.doc_id for e in plan.selected},
         )
+        rule_plan = plan_rule_samples(
+            entries,
+            args.n_rule,
+            args.seed,
+            exclude_doc_ids={e.doc_id for e in plan.selected} | {e.doc_id for e, _ in error_plan.selected},
+        )
     except (FileNotFoundError, ValueError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
@@ -147,6 +157,12 @@ def main(argv: list[str] | None = None) -> int:
             plan, kb_dir, generator, args.model, args.n_answerable, workers=workers
         )
         answerables = [(a.entry, a.ticket) for a in attempts if a.ticket is not None]
+        if args.n_rule:
+            rule_attempts, rule_stats = run_answerables(
+                rule_plan, kb_dir, generator, args.model, args.n_rule, workers=workers
+            )
+            answerables += [(a.entry, a.ticket) for a in rule_attempts if a.ticket is not None]
+            stats.update(rule_stats)
         unanswerables = run_unanswerables(
             generator, args.model, args.n_unanswerable, workers=workers
         )

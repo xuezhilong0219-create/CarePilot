@@ -678,3 +678,20 @@ def test_extract_error_candidates_precision_rules():
     assert "签名验证失败" in ex('调用时提示“签名验证失败”，请检查密钥')
     assert ex('提示后面隔了很长很长很长很长很长很长的一段文字才出现“签名验证失败”') == []  # 关键词离引号超过 10 字
     assert ex("[request][deliveryOrder][orderLines][orderLine][sourceOrderCode]") == []  # XML 字段路径不是报错
+
+
+def test_plan_rule_samples_picks_only_rule_change_docs_and_excludes():
+    from carepilot.evaluation.gen_core import ManifestEntry, category_for, plan_rule_samples
+
+    def entry(doc_id, top_dir, title):
+        return ManifestEntry(doc_id=doc_id, title=title, title_key=title, top_dir=top_dir, source_url=None,
+                             chars=400, kept=True, drop_reason=None, dup_of=None, flags=[])
+
+    entries = [entry(f"企业版/【{i}.1】平台通知{i}", "企业版", f"【{i}.1】平台通知{i}") for i in range(1, 9)]
+    entries += [entry("企业版/订单审核", "企业版", "订单审核"), entry("平台对接_店铺授权/淘宝", "平台对接_店铺授权", "淘宝")]
+    plan = plan_rule_samples(entries, 3, seed=1, exclude_doc_ids={entries[0].doc_id})
+    assert len(plan.selected) == 3 and len(plan.backups) == 4
+    assert all(category_for(e.top_dir, e.title) == "rule_change" for e in plan.selected + plan.backups)
+    assert entries[0].doc_id not in {e.doc_id for e in plan.selected + plan.backups}
+    again = plan_rule_samples(entries, 3, seed=1, exclude_doc_ids={entries[0].doc_id})
+    assert [e.doc_id for e in again.selected] == [e.doc_id for e in plan.selected]
