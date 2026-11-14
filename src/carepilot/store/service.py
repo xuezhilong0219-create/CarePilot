@@ -429,6 +429,15 @@ class TicketStore:
             )
             return self._fetch_ticket(conn, ticket_id)
 
+    def get_principal(self, user_id: str) -> Principal | None:
+        """按用户 id 还原调用者身份：角色和店铺范围来自用户表，**不信任请求里自报的角色**。"""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if row is None:
+                return None
+            shops = [r["shop_id"] for r in conn.execute("SELECT shop_id FROM user_shops WHERE user_id=?", (user_id,))]
+        return Principal(user_id, Role(row["role"]), frozenset(shops))
+
     def find_message_by_idem_key(self, idem_key: str) -> Message | None:
         """按幂等键找消息，供网关崩溃恢复时核实"这条消息到底有没有发出去"。"""
         with self._connect() as conn:

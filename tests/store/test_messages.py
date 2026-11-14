@@ -100,3 +100,11 @@ def test_ticket_context_roundtrip_and_category(store: TicketStore, c1: Principal
         store.set_category(c1, ticket.ticket_id, "other")
     with pytest.raises(NotFound):
         store.get_context("T-999999")
+
+
+def test_get_principal_comes_from_the_users_table(seeded: TicketStore):
+    c1 = seeded.get_principal("c1")
+    assert c1.role.value == "customer" and c1.shop_ids == frozenset({"S1", "S2"})
+    assert seeded.get_principal("a1").role.value == "agent" and seeded.get_principal("a1").shop_ids == frozenset()
+    assert seeded.get_principal("admin1").role.value == "admin"
+    assert seeded.get_principal("nobody") is None

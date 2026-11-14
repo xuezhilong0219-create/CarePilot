@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # 却要多装 1 个本地 embedding 模型、预建 20 分钟的索引。要启用见 README 的「检索策略」一节。
     retriever_kind: str = "bm25"
     index_dir: Path | None = None
+    # 治理模式（工单存储 + 工具网关 + 沙箱）用到的数据文件
+    tickets_db: Path = ROOT / "data" / "tickets.sqlite"
+    gateway_db: Path = ROOT / "data" / "gateway.sqlite"
+    trace_dir: Path = ROOT / "data" / "traces"
 
 
 def get_settings() -> Settings:
