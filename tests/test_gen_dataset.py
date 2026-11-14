@@ -666,3 +666,15 @@ def test_cli_dry_run_prints_error_samples(work_tmp, capsys):
     assert "一条完整的报错样本提示词" in output
 
 
+
+
+def test_extract_error_candidates_precision_rules():
+    from carepilot.evaluation.gen_core import extract_error_candidates as ex
+
+    full = "oauth-error-code[30111]description[access token invalid]"
+    assert full in ex(f"唯品会返回 {full} 说明授权失效")  # 方括号内的空格不会把它截断
+    assert ex('接口返回“success！”表示成功') == []  # 引号内容没有失败类词：界面文案，不是报错
+    assert ex('点击“发货预警设置”按钮，提示“开启声音提示”') == []
+    assert "签名验证失败" in ex('调用时提示“签名验证失败”，请检查密钥')
+    assert ex('提示后面隔了很长很长很长很长很长很长的一段文字才出现“签名验证失败”') == []  # 关键词离引号超过 10 字
+    assert ex("[request][deliveryOrder][orderLines][orderLine][sourceOrderCode]") == []  # XML 字段路径不是报错

@@ -281,9 +281,19 @@ def read_doc(kb_dir: Path, entry: ManifestEntry) -> str:
 # ---------------------------------------------------------------- 报错原文抽取
 
 _QUOTED_ERROR_RE = re.compile(r'[“"]([^“”"\n]{6,80})[”"]')
-_CODE_ERROR_RE = re.compile(r"[A-Za-z0-9_.#:\[\]-]{12,}")
+# 方括号内允许空格，这样 oauth-error-code[30111]description[access token invalid] 才能完整抽出
+_CODE_ERROR_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.#:-]*(?:\[[^\]\n]{1,60}\][A-Za-z0-9_.#:-]*)*")
 _ERROR_CONTEXT_RE = re.compile(r"报错|提示|失败|异常|错误|返回")
-_ERROR_WORD_RE = re.compile(r"error|fail|invalid|exception|code", re.IGNORECASE)
+_ERROR_CONTEXT_WINDOW = 10  # 引号前这么近才算"提示“…”"；30 字时会混进大量界面文案
+# 引号内容本身必须带失败类词，否则 `success！`、`开启声音提示` 这类界面文案会被当成报错。
+# 真实知识库上对比：窗口 30 无内容要求 436 条、噪声大；窗口 10 + 内容要求 166 条、基本都是真报错。
+_ERROR_CUE_RE = re.compile(
+    r"失败|错误|异常|超时|无效|失效|不存在|不足|过期|频繁|禁止|拒绝|无权|权限|未[^\s,，。]{1,3}|无法|不能|不允许|不支持|重复"
+    r"|error|fail|invalid|exception|denied|timeout|not found|null",
+    re.IGNORECASE,
+)
+# 不含单独的 `code`：`…sourceOrderCode]` 这类 XML 字段路径不是报错
+_ERROR_WORD_RE = re.compile(r"error|fail|invalid|exception", re.IGNORECASE)
 
 
 def _meaningful_error(text: str) -> bool:
@@ -301,14 +311,14 @@ def extract_error_candidates(doc_text: str) -> list[str]:
         inner = match.group(1).strip()
         if not (6 <= len(inner) <= 80):
             continue
-        prefix = doc_text[max(0, match.start() - 30) : match.start()]
-        if not _ERROR_CONTEXT_RE.search(prefix):
+        prefix = doc_text[max(0, match.start() - _ERROR_CONTEXT_WINDOW) : match.start()]
+        if not _ERROR_CONTEXT_RE.search(prefix) or not _ERROR_CUE_RE.search(inner):
             continue
         if _meaningful_error(inner):
             found.append((match.start(), inner))
     for match in _CODE_ERROR_RE.finditer(doc_text):
         token = match.group(0)
-        if not _ERROR_WORD_RE.search(token):
+        if len(token) < 12 or not _ERROR_WORD_RE.search(token):
             continue
         if _meaningful_error(token):
             found.append((match.start(), token))
