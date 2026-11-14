@@ -12,6 +12,7 @@ CarePilot 是一个面试作品：旺店通 ERP 的**售后工单助手**。Lang
 3. **不提交任何真实数据或衍生物**：`.env`、`data/raw/`、`data/kb_real/`、`data/index/`、`data/models/`、`eval/real/`（都已在 `.gitignore`）。真实知识库是内部资料。
 4. **不 push，不动别的 worktree，不动主仓库目录。** 你在自己的 git worktree 和分支里工作。
 5. **单元测试不能依赖网络、API key 或真实知识库**，用 `data/kb/` 的示例数据和你自己造的小夹具。需要真实模型/数据的验证，单独写成脚本或用环境变量开关跳过的测试。
+   你的 worktree 里**没有 `.env`**：测试里构造配置要显式传假值，`Settings(llm_api_key="test", llm_base_url="http://localhost:0/v1")`，不要调用 `get_settings()`。
 6. **完成标准**：`uv run pytest -q` 全绿 → 在你自己的分支上 `git add` 你的文件并 `git commit`（英文一行描述）→ 输出 REPORT。测试没过就不要提交，如实写在报告里。
 7. 遇到任务说明没覆盖、或说明有矛盾的地方：选最简单的合理做法继续，并写进报告的"需要决定的事"。不要停下来等。
 8. 不要写样板注释和长篇 docstring。注释只解释"为什么这么做"。类型标注要有。中文注释即可。
