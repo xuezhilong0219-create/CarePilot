@@ -1,0 +1,9 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# 原始知识库导出内容未脱敏前不要入库
+data/raw/
+*.sqlite
+*.db
