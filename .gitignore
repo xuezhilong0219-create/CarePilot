@@ -21,3 +21,4 @@ pytest-cache-files-*/
 .pytest_tmp*/
 .local_tmp_mode/
 .pytest-probe-*/
+data/traces/
