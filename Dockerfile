@@ -30,7 +30,8 @@ COPY --chown=app:app src ./src
 COPY --chown=app:app data/kb ./data/kb
 # 治理模式启动时要在 /app/data 下创建 tickets/gateway/checkpoints 三个 SQLite 文件和 traces 目录。
 # 容器以非 root 运行，/app 又是 WORKDIR 创建的（root 所有），所以不挂卷直接 docker run 时这里不显式授权就会 PermissionError。
-# 用 compose 挂载 ./data 时，挂载会盖住这里；这一步针对的是不挂卷、或挂命名卷的场景。（未经构建验证：本机没有 Docker）
+# 用 compose 挂载 ./data 时，挂载会盖住这里；这一步针对的是不挂卷、或挂命名卷的场景。
+# 已验证：非 root 启动后能在这里创建三个 SQLite；把这行删掉会 PermissionError。
 RUN mkdir -p /app/data/traces && chown -R app:app /app/data
 
 USER app
