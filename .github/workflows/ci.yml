@@ -9,10 +9,10 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 装 uv（和 pyproject 里锁的版本一致）
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10
         with:
           version: "0.12.13"
           python-version: "3.12"

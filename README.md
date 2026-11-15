@@ -1,5 +1,7 @@
 # CarePilot：售后工单助手
 
+[![check](https://github.com/xuezhilong0219-create/CarePilot/actions/workflows/ci.yml/badge.svg)](https://github.com/xuezhilong0219-create/CarePilot/actions/workflows/ci.yml)
+
 面向电商 ERP（旺店通）售后技术支持场景的**工单 Agent**。不只是检索问答：它会查订单/物流/店铺授权/工单进度，对外发送和改状态必须经人工批准，所有动作过一个**没有模型参与判定的工具网关**（四道闸、审计、幂等、崩溃恢复、预算守卫），每次运行落一份节点级 trace，并有评估集度量每次改动的效果。
 
 这是一个个人作品项目，**不是生产系统**：知识库是我做售后技术支持时用过的内部 wiki 导出；订单/物流/店铺是**合成的沙箱数据**；角色靠请求头模拟，**没有真正的认证**；评估集是 LLM 反向合成的。数字用来比较方案，不代表线上效果（见「局限」）。逐项对照功能清单的验收状态见 [docs/status.md](docs/status.md)。
