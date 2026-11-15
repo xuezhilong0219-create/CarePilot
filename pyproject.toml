@@ -14,10 +14,15 @@ dependencies = [
     "jieba>=0.42.1",
     "fastembed>=0.9.1",
     "numpy>=2.4.6",
+    "mcp>=2.3.0",
 ]
 
 [dependency-groups]
-dev = ["pytest", "httpx"]
+dev = [
+    "pytest",
+    "httpx",
+    "ruff>=0.17.5",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -29,3 +34,16 @@ packages = ["src/carepilot"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# 只开「可能真有 bug」的规则，不开纯风格规则：
+# 格式化交给人，lint 只用来抓漏改的导入、未使用的变量、循环里捕获变量的闭包、zip 长度不匹配这类。
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = [
+    "B008", # FastAPI 的 Depends(...) 就写在默认值里，是它的写法，不是 bug
+    "E731", # lambda 赋给变量在 eval/ 里用来做聚合，读起来比 def 更直接
+]
