@@ -17,7 +17,11 @@
 
 ## 恢复
 
-`reconcile()` 取得同一文件锁后扫描 started；因此不会对仍在执行的工具做对账。`verify` 是只读检查：结果字典（包括空字典）表示副作用已存在，None 才表示确定没有副作用。前者记 done 并认领，后者记 abandoned 允许原键重试；异常、工具缺失或没有 verify 一律人工处理。
+`reconcile()` 扫描 started 并逐条核实。工具挪到锁外执行之后，"谁还在跑"不能靠锁判断了，改由**在飞租约**回答：执行期间对 `<db>.leases/<idem_key>` 加一把操作系统文件锁，对账探到锁在就跳过这条（`skipped_inflight`），锁没了说明上一个执行者已经不在了，可以接管。不用 pid 判活：Windows 上 `os.kill(pid, 0)` 不是探测而是 TerminateProcess，`OpenProcess` 在进程刚被强杀后仍可能拿到句柄（实测过），pid 还会复用；文件锁由操作系统在进程消失时释放，正好等于要的语义。
+
+`verify` 是只读检查：结果字典（包括空字典）表示副作用已存在，None 才表示确定没有副作用。前者记 done 并认领，后者记 abandoned 允许原键重试；异常、工具缺失或没有 verify 一律人工处理。
+
+对账有两个开关：`min_age_s` 只处理占位早于这么多秒的行（防止刚起的调用被顺手接管），`dry_run` 只列候选——不调 verify、不写库、不写审计。认领副作用不可回退，所以入口给的是「先看再动」。
 
 账本 status 只用冻结任务规定的 started/done/abandoned；`needs_manual` 放 `action_inputs.recovery_status`，返回列表也包含该值。直接重放 started 返回 `reconciliation_required`，须显式 reconcile；没有 verify 的动作始终保持 started 并拒绝自动重试。
 
@@ -29,7 +33,7 @@
 - **吞吐与卡住风险**：只读与内部写已经不再串行——`eval/bench_gateway.py` 用 16 个不同 run、工具耗时 100ms：改动前墙钟 1.88s（并行度 0.85×，就是串行），改动后 0.25s（6.50×）；跨进程 8 个 0.23s（3.49×）。仍然串行的部分：审批后执行的 STATE_CHANGE / EXTERNAL_SEND 在锁内，SQLite 的所有写入本身也按库串行。工具或 verify 卡住只占住它自己那条调用（只读/内部写），但 `reconcile()` 仍要持锁扫表。RunGuard 只能在节点前检查，不能抢占同步工具；工具必须自带超时，且不能递归调用同一网关。
 - **存储含敏感数据**：审批和恢复需要完整参数，action_inputs/approvals/action_ledger 可能存明文；审计只写 summarize_args、截断结果并兜底屏蔽大陆手机号，其他敏感字段必须由工具自行脱敏，当前没有加密、访问控制或保留期清理。
 - **权限和业务一致性**：身份来自模拟 header；审批不重跑业务规则，工具自身必须在业务事务里防止过期状态迁移。run_id 必须可信且绑定工单/用户，幂等键按冻结算法不含 actor_id 或 ticket_id。
-- **部署与人工恢复**：文件锁依赖本机文件系统，同一个库不能通过不同硬链接或不可靠网络共享访问；无 verify 的 started 需要运维人工对账，当前没有解锁管理 API。
+- **部署与人工恢复**：文件锁（含租约）依赖本机文件系统，同一个库不能通过不同硬链接或不可靠网络共享访问；无 verify 的 started 需要人判断，入口是 `POST /admin/reconcile`（仅管理员，支持 `dry_run`）。`ReconcileSweeper` 可以按 `RECONCILE_INTERVAL_S` 定时扫，默认关闭——认领副作用是写库动作，开不开由部署环境决定。
 - **生命周期限制**：冻结接口未定义 TTL；支持拒绝已标 expired 的记录，但不自动过期；已 rejected/expired 的原键不会生成新审批，需要新 run_id。没有 schema 迁移、审计防篡改、日志轮转。
 
 ## 验收证据

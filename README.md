@@ -234,6 +234,7 @@ uv run python scripts/check.py --skip tests # 只跑 lint，改完一处马上�
 | 产品线过滤（14 对企业版/极速版同名文档 × 2 方向） | 不过滤时混进另一产品线同名文档：**21.4%（纯标题问法）~42.9%（带套话问法）**；过滤后 0/28，没有挤出正确文档 | 过滤后的 0 在构造上基本是保证的（判定和过滤是同一个条件）；有信息量的是不过滤时的比例，但它随问法差一倍。LLM 出陷阱题基本行不通（9 个可区分配对只生成出 3 对），所以直接测检索+过滤 |
 | 一键评测 `--full`（全 279 条，2026-11-15 首次跑完） | Recall@5 0.872，答对率 0.803（n=203），拒答准确率 1.000（n=76），误拒率 0.069（n=203），笼统追问率 1.000（n=40） | 约 7 分钟；这批数字是当前代码（含 MCP + 上下文预算）跑出来的，落在 `--full` 历史波动区间（163~169/203）内。`--quick`（60 条子集）数字更高（答对率 0.872，n=39）但波动更大 |
 | 网关强杀恢复 | 真实子进程强杀，副作用前/后两个崩溃点恢复后副作用恰好 1 次 | Windows 的 `TerminateProcess`，不是 Linux 的 `kill -9`；没有做"整个 API 进程被杀后图的 checkpoint 恢复"的端到端测试 |
+| 卡住的调用 | 管理员专属：`POST /admin/reconcile`（`dry_run` 只列候选、不调 verify/不写库/不写审计）、`GET /admin/inflight`；定时扫描默认关、compose 里开（60 s 一次、只碰 300 s 以前的） | `verify` 只能回答「副作用在不在」，回答不了「是谁做的」；对账仍要持锁扫表 |
 | 预算守卫 | 同一调用连续 3 次 → loop；乱换参数 → 20 步内 steps；超 token/耗时都能打断；被中止后只留内部备注并标 needs_human | 守卫在节点边界和规划循环里计数，**打断不了一个已经卡住的模型调用**（靠 HTTP 超时） |
 | 成本 | 真实运行 8 次：prompt 9108 / completion 4501 tokens，`usage_missing` 0 次 | **没有金额**：网关价格接口返回模糊值，单价必须你自己填 `pricing.json`；没填只报 token |
 
@@ -251,6 +252,24 @@ uv run python scripts/check.py --skip tests # 只跑 lint，改完一处马上�
 - 同一 run、同一参数打 16 次：`executed` 1 次、`replayed` 15 次，副作用文件里只有 1 行。
 - 跨进程 8 个各查一单：墙钟 0.23 s（串行下界 0.80 s），并行度 3.49×，副作用 8 行。
 - **仍然串行的部分**：审批后执行的 `STATE_CHANGE` / `EXTERNAL_SEND` 故意留在锁内（低频、人工触发，审批状态机语义一行没改）；SQLite 的所有写入本身也按库串行。所以这不是「做完了并发」，只是「把不必要的那一段挪出去了，并且量过」。
+
+### 卡住的调用：对账入口，以及它凭什么知道谁在跑
+
+工具挪到锁外之后，「这条调用还在执行」不能再用锁判断了——所以执行期间会在 `<db>.leases/<idem_key>` 上加一把**文件锁**，这就是在飞租约。对账探到锁在就跳过（`skipped_inflight`），锁没了说明上一个执行者不在了，可以接管。
+
+不用 pid 判活是有原因的：Windows 上 `os.kill(pid, 0)` 不是探测而是 `TerminateProcess`，`OpenProcess` 在进程刚被强杀后仍可能返回句柄（实测踩到），pid 还会复用。文件锁由操作系统在进程消失时释放，正好等于「锁在 = 真在跑」。
+
+```bash
+# 先看：不调 verify、不写库、不写审计
+curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?dry_run=true"
+# 再看有没有卡住的调用，以及它有没有活租约
+curl -H "X-User-Id: admin1" localhost:8000/admin/inflight
+# 真对账（仅管理员）
+curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=300"
+```
+
+定时扫描默认**关闭**（`RECONCILE_INTERVAL_S=0`）：对账可能认领一条副作用并记成 `done`，是写库动作，开不开该由部署环境决定；`docker compose` 里默认打开（间隔 60 s、只处理 300 s 以前的）。两个入口都是管理员专属，13 条测试钉住「在飞的不碰、太新的不碰、dry run 什么都不写」。
+
 
 ## 局限（面试前要先讲清楚）
 
@@ -276,7 +295,7 @@ src/carepilot/
   graph/          状态、节点、路由（routing.py 建图与评估共用）、建图
   toolbox.py      把沙箱查询和工单操作注册成网关里的工具；规划→来源校验→执行
   mcpserver.py     MCP 通道：把同一批工具按 MCP 暴露出去，执行仍然落在网关（stdio）
-  gateway/        工具网关：四道闸、审计、幂等账本、批准/二次确认、崩溃对账、预算守卫（没有任何模型调用）
+  gateway/        工具网关：四道闸、审计、幂等账本、批准/二次确认、崩溃对账、在飞租约、预算守卫（没有任何模型调用）
   store/          工单存储：状态机、SLA、三角色权限、可见性、交接摘要
   sandbox/        合成的订单/物流/店铺数据、脱敏、会超时降级的物流客户端
   observability/  节点级 trace、成本统计、节点包装层（trace 和守卫共用）
@@ -289,7 +308,7 @@ src/carepilot/
 eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账
 scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            661 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷）
+tests/            674 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口）
 ```
 
 ## 配置
