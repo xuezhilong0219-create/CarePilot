@@ -1,6 +1,7 @@
 """治理模式的 HTTP 接口：真实的工单存储、网关、沙箱；只有模型是脚本化的假实现。"""
 
 import json
+import sqlite3
 
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
@@ -24,7 +25,7 @@ CHUNK = Chunk(id="企业版/库存同步#0", title="库存同步", text="库存�
               meta={"top_dir": "企业版", "title_key": "库存同步", "source_url": "https://wiki.example/inventory"})
 
 
-def build(tmp_path, triage, draft=None, planner=None, *, hits=None, models_extra=None):
+def build(tmp_path, triage, draft=None, planner=None, *, hits=None, models_extra=None, settings_extra=None):
     world = build_world(7)
     store = TicketStore(tmp_path / "t.sqlite")
     seed_demo_users(store)
@@ -32,7 +33,8 @@ def build(tmp_path, triage, draft=None, planner=None, *, hits=None, models_extra
     tb = Toolbox(world=world, store=store, logistics=logistics, db_path=tmp_path / "g.sqlite")
     t_inv, d_inv, p_inv = (x if isinstance(x, ScriptedInvoker) else ScriptedInvoker(x) for x in (triage, draft, planner))
     app = create_app(
-        settings=Settings(llm_api_key="t", llm_base_url="http://localhost:0/v1", trace_dir=tmp_path / "traces"),
+        settings=Settings(llm_api_key="t", llm_base_url="http://localhost:0/v1", trace_dir=tmp_path / "traces",
+                          **(settings_extra or {})),
         models=Models(triage=t_inv, draft=d_inv, planner=p_inv),
         retriever=FakeRetriever(hits if hits is not None else [Hit(CHUNK, 1.0)]),
         checkpointer=InMemorySaver(), governed=True, store=store, toolbox=tb, chunks=[CHUNK],
@@ -207,3 +209,75 @@ def test_message_validation_and_closed_tickets(tmp_path):
         assert c.post("/tickets", json={"message": "x" * 2001}, headers=H("c1")).status_code == 422
         assert c.post("/tickets", json={"message": "hi", "shop_id": "S3"}, headers=H("c1")).status_code == 403  # 不是他的店铺
         assert c.post("/tickets", json={"message": "hi"}, headers=H("a1")).status_code == 403  # 只有客户能开单
+
+
+def leave_orphan(tb, *, tool="query_order", key="orphan-key", args=None):
+    """模拟「上次执行者崩了」：账本里一行 started，没有租约。"""
+    now = tb.gateway.clock()
+    args_json = json.dumps(args or {"order_id": "X123456"})
+    principal = json.dumps({"user_id": "a1", "role": "agent", "shop_ids": []})
+    with tb.gateway.ledger.transaction() as db:
+        db.execute("INSERT INTO action_ledger (idem_key,run_id,tool,status,created_at,updated_at)"
+                   " VALUES (?,?,?,'started',?,?)", (key, "run-orphan", tool, now, now))
+        db.execute("INSERT INTO action_inputs (idem_key,principal_json,ticket_id,args_json,approver_id,approval_id,recovery_status)"
+                   " VALUES (?,?,?,?,NULL,NULL,NULL)", (key, principal, "T-000001", args_json))
+
+
+def ledger_status(tb) -> str:
+    with sqlite3.connect(tb.gateway.ledger.path) as db:
+        return db.execute("SELECT status FROM action_ledger").fetchone()[0]
+
+
+def test_reconcile_endpoint_is_admin_only(tmp_path):
+    app, *_ = build(tmp_path, make_triage(), make_draft())
+    with TestClient(app) as c:
+        assert c.post("/admin/reconcile", headers=H("c1")).status_code == 403
+        assert c.post("/admin/reconcile", headers=H("a1")).status_code == 403
+        assert c.post("/admin/reconcile").status_code == 401
+        assert c.get("/admin/inflight", headers=H("a1")).status_code == 403
+        assert c.post("/admin/reconcile", headers=H("admin1")).status_code == 200
+
+
+def test_dry_run_lists_the_orphan_without_touching_it(tmp_path):
+    app, world, store, tb, _ = build(tmp_path, make_triage(), make_draft())
+    leave_orphan(tb)
+    with TestClient(app) as c:
+        body = c.post("/admin/reconcile", params={"dry_run": "true"}, headers=H("admin1")).json()
+        assert body["dry_run"] is True
+        assert [o["status"] for o in body["outcomes"]] == ["would_reconcile"]
+        assert ledger_status(tb) == "started"
+        assert tb.gateway.audit(ticket_id="T-000001") == []
+        body = c.post("/admin/reconcile", headers=H("admin1")).json()
+        assert [o["status"] for o in body["outcomes"]] == ["needs_manual"]
+        assert ledger_status(tb) == "started"  # 无 verify 的工具只能交给人
+        assert [e["code"] for e in tb.gateway.audit(ticket_id="T-000001")] == ["reconciled_needs_manual"]
+
+
+def test_inflight_endpoint_reports_whether_the_lease_is_held(tmp_path):
+    app, world, store, tb, _ = build(tmp_path, make_triage(), make_draft())
+    leave_orphan(tb)
+    with TestClient(app) as c:
+        rows = c.get("/admin/inflight", headers=H("admin1")).json()["inflight"]
+        assert [(r["tool"], r["live"]) for r in rows] == [("query_order", False)]
+        tb.gateway.leases.acquire("orphan-key")
+        try:
+            rows = c.get("/admin/inflight", headers=H("admin1")).json()["inflight"]
+            assert rows[0]["live"] is True
+            body = c.post("/admin/reconcile", headers=H("admin1")).json()
+            assert [o["status"] for o in body["outcomes"]] == ["skipped_inflight"]
+        finally:
+            tb.gateway.leases.release("orphan-key")
+
+def test_sweeper_only_runs_when_an_interval_is_configured(tmp_path):
+    app, *_ = build(tmp_path, make_triage(), make_draft(), settings_extra={"reconcile_interval_s": 0.05})
+    with TestClient(app):
+        sweeper = app.state.sweeper
+        assert sweeper is not None and sweeper._thread is not None and sweeper._thread.is_alive()
+        assert "carepilot-reconcile" == sweeper._thread.name
+    assert sweeper._thread is None  # 关停时线程被收起，不留野线程
+
+
+def test_sweeper_stays_off_by_default(tmp_path):
+    app, *_ = build(tmp_path, make_triage(), make_draft())
+    with TestClient(app):
+        assert getattr(app.state, "sweeper", None) is None

@@ -8,6 +8,9 @@ services:
       # 默认用镜像里自带的示例知识库；用真实知识库时在 .env 里设 KB_DIR=/app/data/kb_real
       KB_DIR: ${KB_DIR:-/app/data/kb}
       CHECKPOINT_DB: /app/data/checkpoints.sqlite
+      # 对账：容器里默认开着（60 秒扫一次，只处理 300 秒以前还没结束的调用）；设 0 关掉
+      RECONCILE_INTERVAL_S: ${RECONCILE_INTERVAL_S:-60}
+      RECONCILE_MIN_AGE_S: ${RECONCILE_MIN_AGE_S:-300}
     ports:
       - "8000:8000"
     volumes:

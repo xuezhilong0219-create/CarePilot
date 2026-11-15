@@ -71,6 +71,11 @@ def register_governed(app: FastAPI) -> None:
             raise HTTPException(403, "staff only")
         return principal
 
+    def admin_only(principal: Principal = Depends(current_principal)) -> Principal:
+        if principal.role is not Role.ADMIN:
+            raise HTTPException(403, "admin only")
+        return principal
+
     # ------------------------------------------------------------------ 内部工具
     def thread_config(thread_id: str) -> dict:
         return {"configurable": {"thread_id": thread_id}}
@@ -294,6 +299,20 @@ def register_governed(app: FastAPI) -> None:
     def audit(ticket_id: str, principal: Principal = Depends(staff_only)):
         app.state.store.get_ticket(principal, ticket_id)
         return app.state.toolbox.gateway.audit(ticket_id=ticket_id, limit=500)
+
+    @app.get("/admin/inflight")
+    def admin_inflight(_principal: Principal = Depends(admin_only)) -> dict[str, Any]:
+        """started 还没结束的调用，附「有没有活租约」。只看，不动。"""
+        return {"inflight": app.state.toolbox.gateway.inflight()}
+
+    @app.post("/admin/reconcile")
+    def admin_reconcile(min_age_s: float = 0.0, dry_run: bool = False,
+                        _principal: Principal = Depends(admin_only)) -> dict[str, Any]:
+        """手动对账。`dry_run=true` 只列候选：认领副作用不可回退，先看一眼再动手。"""
+        if min_age_s < 0:
+            raise HTTPException(400, "min_age_s must be >= 0")
+        outcomes = app.state.toolbox.gateway.reconcile(min_age_s=min_age_s, dry_run=dry_run)
+        return {"dry_run": dry_run, "outcomes": outcomes}
 
     @app.get("/citations/{chunk_id:path}")
     def citation(chunk_id: str, principal: Principal = Depends(staff_only)):

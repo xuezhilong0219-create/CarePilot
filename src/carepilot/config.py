@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     trace_dir: Path = ROOT / "data" / "traces"
     # 对话历史的 token 预算（估算值）：最近 3 轮逐字，更早的每轮一行摘要，装不下的从最旧开始丢
     context_budget_tokens: int = 3000
+    # 自动对账：多久扫一次卡在 started 的调用；0 表示关闭（默认关：认领副作用是写库动作，由部署环境决定开不开）
+    reconcile_interval_s: float = 0.0
+    # 早于这个秒数的 started 才算「卡住」——防止刚起 3 秒的调用被顺手接管
+    reconcile_min_age_s: float = 300.0
     # 预算守卫：每个 HTTP 阶段（一次提交 / 一次审核）一份预算
     run_max_steps: int = 20
     run_max_tokens: int = 50_000

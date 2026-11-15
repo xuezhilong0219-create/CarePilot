@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..auth import Principal, Role
 from .audit import AuditLog, safe_summary
+from .lease import LeaseSet
 from .ledger import Ledger, canonical_json, idempotency_key
 from .spec import CallOutcome, Executed, Gate, NeedsApproval, Rejected, Risk, RuleViolation, ToolContext, ToolSpec
 
@@ -50,6 +51,8 @@ class ToolGateway:
         # 同一条调用已经有别的执行者在跑时，重复调用最多等这么久再报未决；等到了就回放，绝不会再执行一次
         self.inflight_wait_s = inflight_wait_s
         self.ledger = Ledger(db_path)
+        # 在飞租约：让 reconcile 知道哪条调用正在执行（工具在锁外跑，账本时间戳分不清"在跑"和"崩了"）
+        self.leases = LeaseSet(db_path)
         self._audit = AuditLog(self.ledger)
         with self.ledger.exclusive(), self.ledger.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
@@ -211,6 +214,9 @@ class ToolGateway:
                                        (approver_id, now, approval_id))
                             self._event(db, ctx, tool, summary, "approved", code="approval_granted", approver_id=approver_id)
                         self._event(db, ctx, tool, summary, "approved", code="execution_intent", approver_id=approver_id)
+                        # 占位与租约在同一个临界区里完成：对账要么看到"有行无锁"（崩了，可以接管），
+                        # 要么看到"有行有锁"（在跑，别碰），不会看到中间态。
+                        self.leases.acquire(ctx.idem_key)
                         return None
             if locked or time.monotonic() > deadline:
                 # 拿着锁的人不能等（会挡住执行者落账），到点也只能报未决
@@ -232,6 +238,15 @@ class ToolGateway:
                               approval_id=approval_id, grant_approval=grant_approval, locked=locked)
         if early is not None:
             return early
+        try:
+            return self._apply(ctx, tool, spec, args, summary, approver_id=approver_id,
+                               approval_id=approval_id, grant_approval=grant_approval, locked=locked)
+        finally:
+            self.leases.release(ctx.idem_key)
+
+    def _apply(self, ctx: ToolContext, tool: str, spec: ToolSpec, args: BaseModel, summary: str,
+               *, approver_id: str | None, approval_id: str | None,
+               grant_approval: bool, locked: bool) -> CallOutcome:
         _crash_point("before_effect")
         exec_code = ""
         try:
@@ -382,13 +397,43 @@ class ToolGateway:
                 db.execute("UPDATE approvals SET status='rejected', updated_at=? WHERE approval_id=?", (self.clock(), approval_id))
                 self._event(db, ctx, row["tool"], "[approval]", "rejected", code="approval_rejected", result=reason, approver_id=approver.user_id)
 
-    def reconcile(self) -> list[dict[str, Any]]:
+    def inflight(self) -> list[dict[str, Any]]:
+        """还没结束的调用（started），附带「有没有活租约」。只读，不写库、不写审计。"""
+        now = self.clock()
+        with self.ledger.connect() as db:
+            rows = db.execute("""SELECT l.idem_key, l.tool, l.run_id, l.created_at, i.ticket_id
+                FROM action_ledger l LEFT JOIN action_inputs i USING(idem_key)
+                WHERE l.status='started' ORDER BY l.created_at, l.idem_key""").fetchall()
+        return [{"idem_key": row["idem_key"], "tool": row["tool"], "run_id": row["run_id"],
+                 "ticket_id": row["ticket_id"], "age_s": round(now - float(row["created_at"]), 3),
+                 "live": self.leases.live(row["idem_key"])} for row in rows]
+
+    def reconcile(self, *, min_age_s: float = 0.0, dry_run: bool = False) -> list[dict[str, Any]]:
+        """扫描 started 并逐条对账。
+
+        - `min_age_s`：只处理占位早于这么多秒的行（默认 0，立刻处理）。
+        - `dry_run`：只列候选，不调 verify、不写库、不写审计——认领副作用不可回退，值得先看一眼。
+        - 有活租约的行一律跳过：它在跑，不是在崩。工具已挪到锁外执行，这里不能再靠锁判断。
+        """
+        now = self.clock()
         outcomes: list[dict[str, Any]] = []
         with self.ledger.exclusive():
             with self.ledger.connect() as db:
                 rows = db.execute("""SELECT l.*, i.principal_json, i.ticket_id, i.args_json, i.approver_id, i.approval_id
                     FROM action_ledger l JOIN action_inputs i USING(idem_key) WHERE l.status='started' ORDER BY l.created_at, l.idem_key""").fetchall()
             for row in rows:
+                age = now - float(row["created_at"])
+                skip = None
+                if self.leases.live(row["idem_key"]):
+                    skip = ("skipped_inflight", "inflight")
+                elif age < min_age_s:
+                    skip = ("skipped_recent", "too_recent")
+                elif dry_run:
+                    skip = ("would_reconcile", "dry_run")
+                if skip is not None:
+                    outcomes.append({"idem_key": row["idem_key"], "tool": row["tool"], "status": skip[0],
+                                     "code": skip[1], "age_s": round(age, 3)})
+                    continue
                 ctx = self._approval_context(row)
                 spec = self.registry.get(row["tool"])
                 result = None

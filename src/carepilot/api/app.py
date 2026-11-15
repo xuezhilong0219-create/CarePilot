@@ -146,9 +146,18 @@ def create_app(
             application.state.chunks_by_id = {c.id: c for c in kb_chunks}
             application.state.graph = build_graph(s, r, application.state.system, cp, models=models, toolbox=tb,
                                                   edition_index=build_edition_index(kb_chunks))
+            if s.reconcile_interval_s > 0:
+                from ..gateway.sweeper import ReconcileSweeper
+
+                application.state.sweeper = ReconcileSweeper(
+                    tb.gateway, interval_s=s.reconcile_interval_s, min_age_s=s.reconcile_min_age_s
+                ).start()
         else:
             application.state.graph = build_graph(s, r, application.state.system, cp, models=models)
         yield
+        sweeper = getattr(application.state, "sweeper", None)
+        if sweeper is not None:
+            sweeper.stop()
         if conn is not None:
             conn.close()
 
