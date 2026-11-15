@@ -237,6 +237,21 @@ uv run python scripts/check.py --skip tests # 只跑 lint，改完一处马上�
 | 预算守卫 | 同一调用连续 3 次 → loop；乱换参数 → 20 步内 steps；超 token/耗时都能打断；被中止后只留内部备注并标 needs_human | 守卫在节点边界和规划循环里计数，**打断不了一个已经卡住的模型调用**（靠 HTTP 超时） |
 | 成本 | 真实运行 8 次：prompt 9108 / completion 4501 tokens，`usage_missing` 0 次 | **没有金额**：网关价格接口返回模糊值，单价必须你自己填 `pricing.json`；没填只报 token |
 
+### 并发：锁只夹记账，不夹执行
+
+网关原来把操作系统文件锁一路握到工具执行结束，等于所有工具调用（包括只读查询）在同一个库上串行。改法是让锁只覆盖账本事务——预留一行 `started`、记账、审批状态、对账；工具在锁外执行。「恰好一次」由那行 `started` 保证，不是靠锁一直握着。
+
+`uv run python eval/bench_gateway.py --procs 8`（假工具、纯本地、不调用模型）：
+
+| 场景 | 并发 | 工具耗时 | 墙钟 | 单次 p50 | 并行度 |
+|---|---|---|---|---|---|
+| 改动前（锁跨过执行） | 16 | 100 ms | 1.88 s | 990 ms | 0.85× |
+| 改动后（锁只夹记账） | 16 | 100 ms | 0.25 s | 184 ms | **6.50×** |
+
+- 同一 run、同一参数打 16 次：`executed` 1 次、`replayed` 15 次，副作用文件里只有 1 行。
+- 跨进程 8 个各查一单：墙钟 0.23 s（串行下界 0.80 s），并行度 3.49×，副作用 8 行。
+- **仍然串行的部分**：审批后执行的 `STATE_CHANGE` / `EXTERNAL_SEND` 故意留在锁内（低频、人工触发，审批状态机语义一行没改）；SQLite 的所有写入本身也按库串行。所以这不是「做完了并发」，只是「把不必要的那一段挪出去了，并且量过」。
+
 ## 局限（面试前要先讲清楚）
 
 - **评估集是 LLM 用文档反向合成的**，问题用词天然偏近原文，BM25 的数字偏乐观。我抽查过一部分，没有逐条人工审核。真实工单上的表现需要真实数据验证。
@@ -249,7 +264,7 @@ uv run python scripts/check.py --skip tests # 只跑 lint，改完一处马上�
 - **单次模型调用耗时随网关负载变化很大**：评估时整单约 3 秒，一次真实走查里单次调用 p50 7.7 秒、最大 20 秒。文档里的耗时数字对"网关繁忙"没有代表性。
 - ~~Docker 镜像没有构建过~~ **已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器）：`docker build` 退出码 0，镜像 714 MB；容器以 `app` 用户启动、健康检查 `healthy`、`/health` 返回 `{"ok":true}`；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 和 `traces/`（那条按推理加的 chown **成立且必需**，删掉会 `PermissionError`）；无 `X-User-Id` 请求 `/tickets` 返回 401；`docker compose config` 解析通过。
 - 构建侧的环境坑（不是项目问题）：国内直连 Docker Hub 超时，且 `# syntax=docker/dockerfile:1` 的 frontend 解析发生在 **buildx 客户端进程**里，不吃 daemon 的代理配置——必须给 `docker build` 命令本身设 `HTTP(S)_PROXY`。
-- **仍未验证**：没有并发和压力测试；trace 查看器只做了静态检查和 XSS 载荷测试，没在真实浏览器里点过。
+- **并发只在网关这一层量过**：`eval/bench_gateway.py` 用的是假工具、单机、8 个进程，没有做端到端压测——真实链路上的一秒级延迟来自模型，不来自网关，两者不该混在一起说。trace 查看器只做了静态检查和 XSS 载荷测试，没在真实浏览器里点过。
 - **MCP 通道没有认证**，身份由 `--user` 启动参数指定，连上来的客户端可以声称是任何人。只读工具在 MCP 上会直接执行；写操作拿不到批准，因为这条通道上没有人能批准。
 - **MCP 只做了 server 方向**：本项目把工具暴露给别的 agent，反过来「用别人的 MCP 工具」还没接进规划节点（规划器的工具集是固定的五个只读工具）。
 - 向量索引离线构建约 20 分钟（2.2 万个 chunk，CPU），本项目没有做增量更新。
@@ -271,10 +286,10 @@ src/carepilot/
   evaluation/     指标、运行器、评估集生成、工具选择/注入评测
   api/            FastAPI：app.py（演示模式）、governed.py（治理模式）
   auth.py         角色与调用者身份（请求头模拟）
-eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审
+eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账
 scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            656 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、XSS 载荷）
+tests/            661 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷）
 ```
 
 ## 配置
