@@ -31,7 +31,9 @@ class Ledger:
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
-        # 锁跨过已提交的审计意图和外部副作用；进程强杀会由操作系统释放。
+        # 跨进程互斥，只用来夹住账本的短事务（占位、记账、审批状态）。工具本身在锁外执行：
+        # 「恰好执行一次」由 action_ledger 里那行 started 保证，不是靠这把锁一直握着。
+        # 进程被强杀时由操作系统释放。
         with self._lock, self.lock_path.open("a+b") as handle:
             if self.lock_path.stat().st_size == 0:
                 handle.write(b"0")
