@@ -20,8 +20,14 @@
 - `docker --version`
 - `docker compose version`（以及旧版 `docker-compose --version`）
 - PowerShell：`Get-Command docker -ErrorAction SilentlyContinue | Format-List Source,Version`；cmd：`where docker`
-- 检查这些路径是否存在（只检查是否存在，不要读里面的内容）：
-  `C:\Program Files\Docker\Docker\Docker Desktop.exe`、`C:\Program Files\Docker\Docker\resources\bin\docker.exe`
+- 检查 Docker Desktop 是否安装（只检查是否存在，不要读里面的内容）。**不要使用任何写死的盘符路径**，一律用环境变量拼，这样不依赖路径的显示形式：
+  `Test-Path (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe')`
+  `Test-Path (Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe')`
+  `Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Docker\Docker\Docker Desktop.exe')`
+  `Test-Path (Join-Path $env:LOCALAPPDATA 'Docker')`
+  同时记录这几个环境变量本身的值（`$env:ProgramFiles`、`$env:LOCALAPPDATA`），方便核对。
+  如果某条检查本身报「拒绝访问」，记录为「沙箱不允许检查」，**不要记成不存在**。
+
 - `docker info`（看守护进程是否在运行；输出很长，只记录前 15 行和任何 `ERROR`/`error` 行）
 - `docker context ls`
 - `wsl -l -v`（只列出发行版，不要在里面执行任何命令）
