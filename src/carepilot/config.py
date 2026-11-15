@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     tickets_db: Path = ROOT / "data" / "tickets.sqlite"
     gateway_db: Path = ROOT / "data" / "gateway.sqlite"
     trace_dir: Path = ROOT / "data" / "traces"
+    # 对话历史的 token 预算（估算值）：最近 3 轮逐字，更早的每轮一行摘要，装不下的从最旧开始丢
+    context_budget_tokens: int = 3000
     # 预算守卫：每个 HTTP 阶段（一次提交 / 一次审核）一份预算
     run_max_steps: int = 20
     run_max_tokens: int = 50_000
