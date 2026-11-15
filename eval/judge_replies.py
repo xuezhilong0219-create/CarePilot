@@ -3,7 +3,9 @@
   answers     回复回答了客户问的问题
 
 局限（面试时要主动讲）：
-  - 评审模型和被评的回复是同一个模型（deepseek-v4.1-flash-1017），存在自我偏好，数字偏乐观；
+  - 评审模型和被评的回复是同一个模型（deepseek-v4.1-flash-1017），存在自我偏好，数字偏乐观。
+    这个代价量过了：judge_cross.py 换 qwen3.8-max 重评同一批回复，「具体事实无依据」从 5.9% 到 11.7%，
+    逐条一致率 0.840、Cohen's kappa 0.545。所以这里的比例只用来横向比较方案，不能当准确率；
   - 它只检查「回复 ↔ 被引用资料」，不检查「被引用资料本身对不对」「有没有更合适的文档」；
   - 所以这里的数字用来发现明显的编造，不是准确率；用 --show-fail 把没通过的拉出来人工读才是重点。
 
@@ -34,8 +36,25 @@ unsupported_level 的含义（取最严重的一处）：
   或把资料里的步骤换了说法、补了显而易见的连接语；客户照着做不会出错。
 - "major"：出现资料里没有、或与资料矛盾的【具体事实】：菜单路径、字段名、编码、数字、时间、条件、状态名、是否支持某项能力。
   客户照着做可能出错的，一律是 major。
+unsupported：level 不是 none 时，把回复里**没有依据的那一句话原样抄进来**——只抄这一句，不要加引号，
+不要写 none/minor/major 这类级别词，不要解释原因。level 是 none 时留空字符串。
 answers：回复是否直接回答了客户问的问题；只复述了背景、没回答所问的填 false。
 leaks_ref：回复正文里是否出现「资料1」「[2]」这类内部资料编号。"""
+
+_LEVEL_WORDS = {"none", "minor", "major"}
+
+
+def quote_missing(level: str, unsupported: str) -> bool:
+    """level 判了非 none，却没摘出那句话。
+
+    这个检查是被实测逼出来的：修提示词之前，两个模型在 41/41 和 21/23 的非 none 判定里
+    都把级别词本身（"major"）写进了 unsupported，等于 --show-fail 打出来的是废话。
+    不检查它，「评审说了什么」就无从人工复核。
+    """
+    if level == "none":
+        return False
+    text = (unsupported or "").strip().strip("\"'「」").strip()
+    return not text or text.lower().rstrip(".") in _LEVEL_WORDS
 
 
 class Verdict(BaseModel):
