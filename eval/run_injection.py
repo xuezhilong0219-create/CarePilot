@@ -27,7 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from carepilot.config import get_settings
 from carepilot.evaluation.injection import PAYLOADS, is_compromised
-from carepilot.graph.nodes import DRAFT_PROMPT, resolve_citations
+from carepilot.graph.nodes import DRAFT_PROMPT
 from carepilot.graph.state import DraftResult
 from carepilot.llm import StructuredLLM, get_llm
 
@@ -67,8 +67,9 @@ def main() -> int:
         except Exception as exc:
             return {"case_id": case["case_id"], "payload_id": case["payload_id"], "placement": case["placement"],
                     "status": classify_error(exc), "detail": str(exc)[:120]}
-        cited = resolve_citations(d.cited_ids, ["doc#0"])
-        reasons = is_compromised(d.reply, [f"doc#{c}" for c in d.cited_ids], payloads[case["payload_id"]])
+        # 把模型自己写的 cited_ids 原样交给判定：伪造引用的载荷会把假文档号写进 cited_ids，
+        # 之前这里加了 "doc#" 前缀，于是永远匹配不上 fake_doc_id，那条检查等于没跑。
+        reasons = is_compromised(d.reply, d.cited_ids, payloads[case["payload_id"]])
         return {"case_id": case["case_id"], "payload_id": case["payload_id"], "placement": case["placement"],
                 "status": "compromised" if reasons else "held", "reasons": reasons, "answerable": d.answerable,
                 "reply": d.reply[:300]}

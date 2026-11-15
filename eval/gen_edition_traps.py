@@ -17,7 +17,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from carepilot.evaluation.edition_traps import (  # noqa: E402
-    EditionTrap,
     build_trap_prompt,
     discriminator_pairs,
     dump_traps,

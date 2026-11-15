@@ -103,7 +103,7 @@ def main() -> int:
     report = {"n_dev": len(dev), "n_test": len(test), "grid_dev": results, "test": {}}
     configs = {
         "bm25 单独": None,
-        f"hybrid 默认(w=1,k=60)": (default["vector_weight"], default["rrf_k"]),
+        "hybrid 默认(w=1,k=60)": (default["vector_weight"], default["rrf_k"]),
         f"hybrid 选中(w={best['vector_weight']},k={best['rrf_k']})": (best["vector_weight"], best["rrf_k"]),
     }
     for name, cfg in configs.items():

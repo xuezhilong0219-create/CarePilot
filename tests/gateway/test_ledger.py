@@ -47,9 +47,9 @@ def test_two_thread_barrier_fifty_rounds_execute_once(setup_gateway):
     with ThreadPoolExecutor(max_workers=2) as pool:
         for index in range(50):
             barrier = threading.Barrier(2)
-            def call(worker):
+            def call(worker, run=index, barrier=barrier):
                 barrier.wait(timeout=5)
-                return gateways[worker].call(ToolContext(AGENT, f"round-{index}"), "internal", {"shop_id": "mine"})
+                return gateways[worker].call(ToolContext(AGENT, f"round-{run}"), "internal", {"shop_id": "mine"})
             results = list(pool.map(call, (0, 1)))
             assert all(isinstance(result, Executed) for result in results)
             assert sorted(result.replayed for result in results) == [False, True]

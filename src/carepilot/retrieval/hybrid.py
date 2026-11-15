@@ -23,7 +23,7 @@ class HybridRetriever:
         if k <= 0 or not query.strip():
             return []
         fetch_k = max(20, k * self.max_chunks_per_doc)
-        active = [(r, w) for r, w in zip(self.retrievers, self.weights) if w > 0]
+        active = [(r, w) for r, w in zip(self.retrievers, self.weights, strict=True) if w > 0]
         while True:
             scores: dict[str, float] = defaultdict(float)
             chunks: dict[str, Chunk] = {}

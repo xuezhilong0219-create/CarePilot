@@ -263,7 +263,7 @@ def _run_random_sequence(seed: int, work_dir: Path) -> tuple[FakeTools, list[dic
                 f"seed={seed} 第 {step} 步被拒绝却执行了工具: {outcome}\n" + "\n".join(log)
             )
         # I3：EXTERNAL_SEND 只能在确认阶段产生副作用
-        for (run, tool, _), count in (after - before).items():
+        for (_, tool, _), _count in (after - before).items():
             if tool == "send":
                 assert kind == "confirm" and isinstance(outcome, Executed), (
                     f"seed={seed} 第 {step} 步 send 在非 confirm 阶段执行: kind={kind} "
@@ -328,7 +328,7 @@ def test_concurrent_same_key_executes_once(work_dir):
         ids: list[str] = []
         ids_lock = threading.Lock()
 
-        def state_worker() -> None:
+        def state_worker(r=r, barrier=barrier, ids=ids, ids_lock=ids_lock) -> None:
             ctx = ctx_for(principal(Role.AGENT), "run-1")
             barrier.wait()
             outcome = gw.call(ctx, "state", {"status": f"s{r}"})
@@ -344,7 +344,7 @@ def test_concurrent_same_key_executes_once(work_dir):
         assert ids, f"第 {r} 轮没有任何批准单"
         barrier2 = threading.Barrier(threads)
 
-        def approve_worker(index: int) -> None:
+        def approve_worker(index: int, barrier2=barrier2, ids=ids) -> None:
             approval_id = ids[index % len(ids)]
             barrier2.wait()
             gw.approve(approval_id, principal(Role.ADMIN))
@@ -360,7 +360,7 @@ def test_concurrent_same_key_executes_once(work_dir):
         barrier3 = threading.Barrier(threads)
         send_ids: list[str] = []
 
-        def send_call_worker() -> None:
+        def send_call_worker(r=r, barrier3=barrier3, send_ids=send_ids, ids_lock=ids_lock) -> None:
             ctx = ctx_for(principal(Role.AGENT), "run-1")
             barrier3.wait()
             outcome = gw.call(ctx, "send", {"phone": PHONE, "message": f"m{r}"})
@@ -376,7 +376,7 @@ def test_concurrent_same_key_executes_once(work_dir):
         assert send_ids, f"第 {r} 轮发送没有批准单"
         barrier4 = threading.Barrier(threads)
 
-        def send_approve_worker(index: int) -> None:
+        def send_approve_worker(index: int, barrier4=barrier4, send_ids=send_ids) -> None:
             barrier4.wait()
             gw.approve(send_ids[index % len(send_ids)], principal(Role.ADMIN))
 
@@ -387,7 +387,7 @@ def test_concurrent_same_key_executes_once(work_dir):
             t.join(timeout=30)
         barrier5 = threading.Barrier(threads)
 
-        def confirm_worker(index: int) -> None:
+        def confirm_worker(index: int, barrier5=barrier5, send_ids=send_ids) -> None:
             barrier5.wait()
             gw.confirm(send_ids[index % len(send_ids)], principal(Role.ADMIN))
 

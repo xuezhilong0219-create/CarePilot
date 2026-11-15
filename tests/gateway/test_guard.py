@@ -31,7 +31,7 @@ def test_different_proposals_stop_on_twenty_first_step():
 
 def test_nonconsecutive_loop_uses_canonical_arguments():
     guard = RunGuard(RunBudget())
-    for index in range(3):
+    for _ in range(3):
         guard.step("tool", tool="read", args={"b": 2, "a": 1})
         guard.step("node")
     with pytest.raises(BudgetExceeded, match="loop"):

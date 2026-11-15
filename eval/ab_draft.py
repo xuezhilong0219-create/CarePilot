@@ -12,7 +12,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from carepilot.config import get_settings
-from carepilot.evaluation.schema import EvalItem, load_dataset
+from carepilot.evaluation.schema import load_dataset
 from carepilot.graph.nodes import DRAFT_PROMPT, build_query, resolve_citations
 from carepilot.graph.state import DraftResult
 from carepilot.llm import StructuredLLM, get_llm

@@ -16,7 +16,7 @@ def legacy_search(chunks: list[Chunk], query: str, tokenizer: str) -> list[tuple
     df = Counter(token for doc in docs for token in doc)
     idf = {t: math.log(1 + (len(chunks) - n + .5) / (n + .5)) for t, n in df.items()}
     scored = []
-    for chunk, doc, length in zip(chunks, docs, lengths):
+    for chunk, doc, length in zip(chunks, docs, lengths, strict=True):
         score = 0.0
         for token in tokenize(query, tokenizer):
             tf = doc.get(token, 0)

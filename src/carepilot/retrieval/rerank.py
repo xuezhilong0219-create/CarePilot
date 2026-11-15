@@ -23,7 +23,7 @@ class Reranker(Protocol):
 def _rank(hits: Sequence[Hit], scores: Sequence[float], k: int) -> list[Hit]:
     if len(scores) != len(hits) or any(not math.isfinite(score) for score in scores):
         raise ValueError("Reranker must return one finite score per passage")
-    return sorted((Hit(hit.chunk, float(score)) for hit, score in zip(hits, scores)), key=lambda hit: -hit.score)[:k]
+    return sorted((Hit(hit.chunk, float(score)) for hit, score in zip(hits, scores, strict=True)), key=lambda hit: -hit.score)[:k]
 
 
 class CrossEncoderReranker:

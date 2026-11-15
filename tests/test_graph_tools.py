@@ -15,7 +15,7 @@ from carepilot.graph.build import build_graph
 from carepilot.graph.nodes import (
     Models, build_edition_index, build_query, citation_details, filter_by_edition, merge_slots, normalize_edition,
 )
-from carepilot.graph.state import DraftResult, ToolPlan, Triage
+from carepilot.graph.state import ToolPlan
 from carepilot.retrieval.base import Chunk, Hit
 from carepilot.sandbox import tools as sbx
 from carepilot.sandbox.data import build_world
@@ -109,7 +109,7 @@ def test_data_exception_queries_own_order_then_drafts_from_facts_and_saves_inter
 
 def test_foreign_order_and_nonexistent_order_get_the_same_followup(make_env):
     world = build_world(7)
-    foreign, mine = order_of(world, "S3"), order_of(world, "S1")
+    foreign = order_of(world, "S3")
     replies = []
     for oid in (foreign.order_id, "9" * 12):
         env = make_env(DATA_EXC(), None, [ToolPlan(tool="query_order", order_id=oid), ToolPlan(tool="none")])
@@ -281,7 +281,6 @@ def test_edition_filter_drops_only_the_wrong_siblings():
 
 def test_retrieve_widens_the_search_and_filters_when_the_customer_names_an_edition(make_env, tmp_path):
     hits = [_chunk("企业版/订单", "企业版", "订单"), _chunk("极速版2.0/订单", "极速版2.0", "订单")]
-    world, store = build_world(7), TicketStore(tmp_path / "x.sqlite")
     retriever = FakeRetriever(hits)
     graph = build_graph(Settings(llm_api_key="t", llm_base_url="http://localhost:0/v1"), retriever, TicketSystem(), InMemorySaver(),
                         models=Models(ScriptedInvoker(make_triage(category="feature_howto", feature_name="订单", product_edition="极速版")),

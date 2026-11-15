@@ -181,7 +181,7 @@ def step_pipeline(ctx: Mapping[str, Any]) -> dict[str, Any]:
         settings = get_settings()
     records = run_pipeline(items, settings, _build_bm25({**ctx, "settings": settings}), concurrency=4)
 
-    ok = [(item, rec) for item, rec in zip(items, records) if not rec.get("error")]
+    ok = [(item, rec) for item, rec in zip(items, records, strict=True) if not rec.get("error")]
     answerable = [(item, rec) for item, rec in ok if item.answerable]
     unanswerable = [(item, rec) for item, rec in ok if not item.answerable]
     vague = [(item, rec) for item, rec in ok if stratum(item) == "含糊"]

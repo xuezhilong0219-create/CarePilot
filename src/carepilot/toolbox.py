@@ -29,7 +29,7 @@ from .graph.state import ToolPlan
 from .sandbox import tools as sbx
 from .sandbox.data import World
 from .sandbox.logistics import LogisticsClient
-from .store import STATUSES, NotFound, TicketStore, can_modify, can_transition, can_view
+from .store import NotFound, TicketStore, can_modify, can_transition, can_view
 
 SYSTEM_PRINCIPAL = Principal("system", Role.ADMIN)
 STAFF = frozenset({Role.AGENT, Role.ADMIN})

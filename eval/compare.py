@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     reports = [load_report(path) for path in args.reports]
-    names = [report.get("name") or Path(path).stem for report, path in zip(reports, args.reports)]
+    names = [report.get("name") or Path(path).stem for report, path in zip(reports, args.reports, strict=True)]
     summaries = [report.get("summary") or {} for report in reports]
 
     keys = [key for key in CORE_KEYS if any(_get(summary, key) is not None for summary in summaries)]

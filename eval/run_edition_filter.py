@@ -58,16 +58,16 @@ def main() -> int:
                 before = raw[: args.k]
                 after = filter_by_edition(raw, edition_dir, index)[: args.k]
 
-                def stale(hits: list[dict]) -> bool:  # 命中另一个产品线的同名文档
+                def stale(hits: list[dict], other=other, entry=entry) -> bool:  # 命中另一个产品线的同名文档
                     return any(h["top_dir"] == other.top_dir and h["title_key"] == entry.title_key for h in hits)
 
-                def gold(hits: list[dict]) -> bool:
+                def gold(hits: list[dict], entry=entry) -> bool:
                     return any(h["doc_id"] == entry.doc_id for h in hits)
 
                 rows.append({"title": entry.title, "edition": entry.top_dir, "stale_before": stale(before), "stale_after": stale(after),
                              "gold_before": gold(before), "gold_after": gold(after)})
         n = len(rows)
-        f = lambda key: sum(r[key] for r in rows)  # noqa: E731
+        f = lambda key, rows=rows: sum(r[key] for r in rows)  # noqa: E731
         lost = [r for r in rows if r["gold_before"] and not r["gold_after"]]
         print(f"\n[{style}] 同名配对 {len(pairs)} 对 → {n} 条问句，检索器 {args.retriever}，K={args.k}")
         print(f"  命中旧文档率   不过滤 {f('stale_before')}/{n} = {f('stale_before') / n:.1%}   过滤后 {f('stale_after')}/{n} = {f('stale_after') / n:.1%}")

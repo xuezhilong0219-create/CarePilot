@@ -6,7 +6,7 @@
 
 from carepilot.gateway.spec import Executed, Gate, Rejected, ToolContext
 
-from conftest import ADMIN, AGENT, CUSTOMER
+from conftest import AGENT, CUSTOMER
 
 
 def test_replay_by_the_same_principal_is_still_allowed(setup_gateway):

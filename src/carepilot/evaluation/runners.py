@@ -206,7 +206,7 @@ def _latency_stats(records: Sequence[Mapping[str, Any]], key: str) -> dict[str, 
 def summarize_pipeline(
     items: Sequence[EvalItem], records: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
-    pairs = list(zip(items, records))
+    pairs = list(zip(items, records, strict=True))
     ok = [(item, rec) for item, rec in pairs if not rec.get("error")]
     errors = len(pairs) - len(ok)
 
