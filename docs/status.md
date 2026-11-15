@@ -72,5 +72,5 @@
 - 纯标题问法下，同版本的正确文档只有 6/28 排在前 4 个里——很多文档光靠标题检索就找不到自己。这是一个与版本无关的独立检索问题，没有处理。
 - `eval_all.py --quick` 端到端跑通过一次（见下），但**`--full` 没有跑过**。
 - 没有在真实浏览器里验证 trace 查看器。
-- Docker 镜像仍未构建（本机没有 docker），compose 文件只做了语法检查。
+- **Docker 镜像仍未构建，而且已经确认原因：这台 Windows 机器上没有 Docker。**DeepSeek Harness 做了检测（`docker`/`docker-compose`/`podman` 命令都不存在，`where` 找不到，Docker Desktop 的标准安装位置都不存在，注册表里没有卸载项，并排除了"沙箱挡住所以看不到"），我独立复核得到同样结论。唯一没检查的是 WSL 里那个已停止的发行版 `dify-ubuntu`（里面有没有 Linux 版 docker 不知道，进去需要先启动它，我没有替你启动）。compose 文件只做了语法检查。**推理出的一个问题**：容器以非 root 运行，`/app/data` 可能不可写，不挂卷运行会在启动时 `PermissionError`；已在 Dockerfile 里加了显式建目录和授权，**但这个修改没有经过构建验证**。
 - 没有并发/压力测试。
