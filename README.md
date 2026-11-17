@@ -351,7 +351,7 @@ curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=30
 
 另有三处小修：`reply_edited` 进 `build_view`（人工改过的回复不再挂着原引用，审计里标 `edited_by_human`）；纯空白消息在 API 层直接 422；`scripts/check.py` 一步都没跑时退出码 2。
 
-验证：`scripts/check.py` → ruff 全绿 + **713 passed**；44 条真实链路冒烟（独立数据目录、真实模型、逐条断言）全过；`eval_all.py --quick` → 答对率 0.846 / 拒答准确率 1.000 / 工具选择 1.000 / 泄露 0。
+验证：`scripts/check.py` → ruff 全绿 + **714 passed**；44 条真实链路冒烟（独立数据目录、真实模型、逐条断言）全过；`eval_all.py --quick` → 答对率 0.846 / 拒答准确率 1.000 / 工具选择 1.000 / 泄露 0。
 
 ## 局限（面试前要先讲清楚）
 
@@ -390,7 +390,7 @@ src/carepilot/
 eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账、latency_profile.py=延迟账、ttft_probe.py=首字延迟
 scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py、check_viewer.py（无头浏览器验查看器）
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            713 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
+tests/            714 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
 ```
 
 ## 配置
