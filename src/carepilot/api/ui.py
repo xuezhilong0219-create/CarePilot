@@ -619,10 +619,14 @@ function renderSide(view) {
     const sec = el("section");
     sec.append(el("h4", null, "你能做什么"));
     const c = el("div", "callout plain", "");
-    c.append(el("b", null, "自动处理"), document.createTextNode(
+    const waiting = view.status === "awaiting_review" || view.status === "awaiting_confirmation";
+    c.append(el("b", null, waiting ? "等待人工确认" : "自动处理"), document.createTextNode(
       view.status === "resolved" ? "这单已经解决了。" :
       view.status === "escalated" ? "已转给人工，稍后会有同事跟进。" :
       view.status === "need_info" ? "系统需要你补充信息，看上方提示。" :
+      view.status === "awaiting_review" ? "系统已经处理完，正在等坐席确认后回复你；不用重复发送。" :
+      view.status === "awaiting_confirmation" ? "回复已经写好，坐席做完最后确认就会发出。" :
+      view.status === "action_failed" ? "刚才那一步没成功，已经转给人工接手。" :
       "系统正在处理，结果会以消息形式出现在会话里。"
     ));
     sec.append(c);
