@@ -150,6 +150,31 @@ curl -N -X POST 'localhost:8000/tickets?stream=true' -H 'X-User-Id: c1' -H 'cont
 
 每次运行落一份 trace JSON 到 `data/traces/`，用 `uv run python scripts/trace_viewer.py --traces data/traces --out viewer.html` 生成可按节点展开的单文件查看器；成本报表见 `scripts/cost_report.py`（单价需要你自己填 `pricing.json`，不会替你编价格）。一键评测：`python eval/eval_all.py --quick`（本机没有 `make`；Makefile 只是转发）。
 
+## 界面（用浏览器点，不用 curl）
+
+```bash
+uv run uvicorn carepilot.api.app:app --port 8000
+# 打开 http://127.0.0.1:8000/
+```
+
+右上角切身份（`c1`/`c2`/`c3`/`a1`/`a2`/`admin1`，就是换 `X-User-Id`）。三栏：左边工单列表，中间会话，右边坐席的处理台。一条完整链路在浏览器里是这样的：
+
+1. 客户点「＋ 新建」，写下问题；提交后中间栏逐个亮起节点（分诊 → 检索 → 起草 → 待审核），亮的是真的 SSE 事件，不是假进度条。
+2. 切到 `a1`，右侧出现**待审核**：草稿全文、引用卡片（点开看知识库原文）、审核备注输入框。
+3. 点「通过并发送」→ 工单变成**待二次确认**，右侧出现确认卡片；再点「确认发送（真实动作）」→ 消息进会话、工单置 `resolved`。
+4. 「交接摘要」「审计流水」懒加载后端的 `/handoff` 与 `/audit`，审计里能看到 `needs_approval → approved → confirmed → executed` 这一串。
+
+升级卡（知识库答不了、要查账单）在界面上是「建议升级 + 升级原因」，按钮变成「确认升级」，没有二次确认的发送——因为根本没有对外发送这一步。
+
+几个刻意的取舍：
+
+- **单文件、无框架、无构建链**：`src/carepilot/api/ui.py` 一个 Python 字符串装下 HTML/CSS/JS，`GET /` 直接吐出来。没有 npm、没有打包产物、不做 SSR——这是个演示台，不是产品前端。
+- **页面不内嵌任何业务数据**：`render_ui()` 只替换 CSP 和演示用户两个常量，工单内容全部由浏览器 `fetch` 拿 JSON 再用 `createElement`/`textContent` 建 DOM。`tests/test_ui.py` 里有一条用 `<img onerror>` 当工单标题，断言首页 HTML 里搜不到它。
+- **CSP 收得很紧**：`default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。没有外链字体、图标、CDN。
+- **身份只是下拉框**：切换身份就是换一个请求头，背后没有登录。这跟前端无关——后端的认证本来就是假的，README 局限里写了。
+
+已知没做的：SSE 断了不自动重连（刷新页面即可）；进度条在结果回来后清空，不保留历史节点；审计固定取 500 行，前端只显示最后 40 条。
+
 ## 质量门禁
 
 ```bash
@@ -337,12 +362,12 @@ src/carepilot/
   retrieval/      BM25（倒排）、向量、RRF 混合、重排、factory
   ingest/         知识库清洗（纯规则，确定性）
   evaluation/     指标、运行器、评估集生成、工具选择/注入评测
-  api/            FastAPI：app.py（演示模式）、governed.py（治理模式）
+  api/            FastAPI：app.py（演示模式）、governed.py（治理模式）、ui.py（单文件工单台，GET / 直接吐 HTML）
   auth.py         角色与调用者身份（请求头模拟）
 eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账、latency_profile.py=延迟账、ttft_probe.py=首字延迟
 scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py、check_viewer.py（无头浏览器验查看器）
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            689 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
+tests/            694 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
 ```
 
 ## 配置

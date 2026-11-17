@@ -12,7 +12,7 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,7 @@ from ..observability.tracer import RunTracer
 from ..store import Conflict, Forbidden, IllegalTransition, NotFound, Ticket, build_handoff, can_modify
 from ..toolbox import SYSTEM_PRINCIPAL, principal_to_dict
 from .app import _sse, _summary
+from .ui import CSP, render_ui
 
 PRIORITY_BY_SEVERITY = {"low": "low", "medium": "medium", "high": "high", "critical": "critical"}
 
@@ -217,6 +218,16 @@ def register_governed(app: FastAPI) -> None:
         yield _sse("result", view)
 
     # ------------------------------------------------------------------ 路由
+    @app.get("/", include_in_schema=False)
+    def index() -> HTMLResponse:
+        """工作台页面。纯静态 HTML，业务数据一律由前端用 JSON 接口取。"""
+        return HTMLResponse(render_ui(), headers={"Content-Security-Policy": CSP})
+
+    @app.get("/whoami")
+    def whoami(principal: Principal = Depends(current_principal)) -> dict[str, Any]:
+        """切换身份后用它决定界面显示哪些控件（角色和店铺范围都取自用户表）。"""
+        return {"user_id": principal.user_id, "role": principal.role.value, "shops": sorted(principal.shop_ids)}
+
     @app.post("/tickets")
     def create_ticket(body: TicketCreate, stream: bool = False, principal: Principal = Depends(current_principal)):
         if principal.role is not Role.CUSTOMER:
