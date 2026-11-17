@@ -80,7 +80,7 @@
 - 纯标题问法下，同版本的正确文档只有 6/28 排在前 4 个里——很多文档光靠标题检索就找不到自己。这是一个与版本无关的独立检索问题，没有处理。
 - `eval_all.py --full` 已用当前代码跑过一次全 279 条：答对率 163/203 = 80.3%、误拒 14/203 = 6.9%，落在历史四次 163~169/203 的波动区间内。
 - ~~没有在真实浏览器里验证 trace 查看器~~ **已验**：`scripts/check_viewer.py` 用无头 Edge 渲染 12 个 run 并检查执行后的 DOM（缺标记退出 1、找不到浏览器退出 2 不算通过）；点击切换 run 在 Chromium 里手工点过一次，没有自动化。
-- **Docker 镜像已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器，2026-11-15）：`docker build` 退出码 0，镜像 714 MB；容器内 `uid=999(app)`，`/app/data` 属主 `app:app` 且可写；启动后 `/health` 返回 `{"ok":true}`，无 `X-User-Id` 请求 `/tickets` 返回 401；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 与 `traces/`；`docker compose config` 解析通过。之前推理出的风险（非 root 下 `/app/data` 不可写）**成立，且已被 Dockerfile 里那条 chown 修掉**——删掉该行会 `PermissionError`。构建侧环境问题：国内直连 Docker Hub 超时，`# syntax=docker/dockerfile:1` 的 frontend 解析发生在 **buildx 客户端**，只配 daemon 代理不够，必须给 `docker build` 命令本身设 `HTTP(S)_PROXY`。
+- **Docker 镜像已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器，2026-11-15）：`docker build` 退出码 0，镜像 713 MB；容器内 `uid=999(app)`，`/app/data` 属主 `app:app` 且可写；启动后 `/health` 返回 `{"ok":true}`，无 `X-User-Id` 请求 `/tickets` 返回 401；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 与 `traces/`；`docker compose config` 解析通过。之前推理出的风险（非 root 下 `/app/data` 不可写）**成立，且已被 Dockerfile 里那条 chown 修掉**——删掉该行会 `PermissionError`。构建侧环境问题：国内直连 Docker Hub 超时，`# syntax=docker/dockerfile:1` 的 frontend 解析发生在 **buildx 客户端**，只配 daemon 代理不够，必须给 `docker build` 命令本身设 `HTTP(S)_PROXY`。
 - ~~没有并发/压力测试~~ **网关层已量过**（`eval/bench_gateway.py`，假工具、单机、8 进程）：16 个不同 run 的墙钟从 1.88 s 降到 0.25 s。没有做端到端压测——真实链路的一秒级延迟来自模型，不来自网关。
 
 ## 收尾审查（2026-11-17，Codex）

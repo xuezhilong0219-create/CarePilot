@@ -363,7 +363,7 @@ curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=30
 - **订单、物流、店铺是合成的沙箱数据**，不是真实系统；**角色靠请求头模拟，没有密码或令牌**，不能直接上线。审计表没有防篡改。
 - 工具选择和注入评测的用例都是模板，比真实客户规整。
 - **单次模型调用耗时随网关负载变化很大**：40 条串行实测整单 p50 6.01 s / p95 8.95 s，同一天另一次真实走查里单次调用 p50 7.7 s、最大 20 s。文档里的耗时数字对"网关繁忙"没有代表性，别当 SLA。
-- ~~Docker 镜像没有构建过~~ **已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器）：`docker build` 退出码 0，镜像 714 MB；容器以 `app` 用户启动、健康检查 `healthy`、`/health` 返回 `{"ok":true}`；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 和 `traces/`（那条按推理加的 chown **成立且必需**，删掉会 `PermissionError`）；无 `X-User-Id` 请求 `/tickets` 返回 401；`docker compose config` 解析通过。
+- ~~Docker 镜像没有构建过~~ **已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器）：`docker build` 退出码 0，镜像 713 MB；容器以 `app` 用户启动、健康检查 `healthy`、`/health` 返回 `{"ok":true}`；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 和 `traces/`（那条按推理加的 chown **成立且必需**，删掉会 `PermissionError`）；无 `X-User-Id` 请求 `/tickets` 返回 401；`docker compose config` 解析通过。
 - 构建侧的环境坑（不是项目问题）：国内直连 Docker Hub 超时，且 `# syntax=docker/dockerfile:1` 的 frontend 解析发生在 **buildx 客户端进程**里，不吃 daemon 的代理配置——必须给 `docker build` 命令本身设 `HTTP(S)_PROXY`。
 - **并发只在网关这一层量过**：`eval/bench_gateway.py` 用的是假工具、单机、8 个进程，没有做端到端压测。延迟的分解已经量过（见上面「延迟」一节：模型 p50 6.01 s、本地 p50 1 ms），但那是串行单机的一次采样，不是容量结论。**trace 查看器已在无头浏览器里验过**（`uv run python scripts/check_viewer.py`：渲染 12 个 run，检查执行后的 DOM 里有没有详情面板；缺标记退出 1，找不到浏览器退出 2、不算通过）。点击切换 run 是在 Chromium 里手工点过一次，没有自动化。
 - **MCP 通道没有认证**，身份由 `--user` 启动参数指定，连上来的客户端可以声称是任何人。只读工具在 MCP 上会直接执行；写操作拿不到批准，因为这条通道上没有人能批准。
