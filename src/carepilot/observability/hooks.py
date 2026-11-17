@@ -72,7 +72,10 @@ def summarize_patch(name: str, patch: Mapping[str, Any] | None) -> str:
         tr = p.get("tool_run") or {}
         return f"outcome={tr.get('outcome')} calls={tr.get('calls')}"
     if name == "draft_reply":
-        return f"resolution={p.get('resolution')} cited={len(p.get('citations') or [])} reason={p.get('escalate_reason')}"
+        parts = [f"resolution={p.get('resolution')}", f"cited={len(p.get('citations') or [])}"]
+        if p.get("escalate_reason"):
+            parts.append(f"reason={p['escalate_reason']}")
+        return " ".join(parts)
     if name in ("ask_for_info", "route_escalation"):
         return f"resolution={p.get('resolution')} route={p.get('route_to')}"
     if name == "execute_actions":

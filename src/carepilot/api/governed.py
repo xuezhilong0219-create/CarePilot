@@ -311,6 +311,61 @@ def register_governed(app: FastAPI) -> None:
         app.state.store.get_ticket(principal, ticket_id)
         return app.state.toolbox.gateway.audit(ticket_id=ticket_id, limit=500)
 
+    @app.get("/tickets/{ticket_id}/trace")
+    def trace(ticket_id: str, principal: Principal = Depends(staff_only)) -> dict[str, Any]:
+        """最近一轮的节点级 trace：每个节点花了多久、模型调用多少 token、有没有报错。
+
+        只读磁盘上已经落好的那份 JSON，不重跑图、不碰网关账本，所以随便点不产生副作用。
+        """
+        store = app.state.store
+        store.get_ticket(principal, ticket_id)
+        thread_id = store.get_context(ticket_id)["last_thread_id"]
+        if not thread_id:
+            raise NotFound(f"{ticket_id} 还没有跑过")
+        try:
+            t = app.state.trace_store.load(thread_id)
+        except (FileNotFoundError, ValueError):
+            raise NotFound(f"{ticket_id} 这一轮没有 trace") from None
+        prompt, completion = t.total_tokens
+        # 停在等待审核的轮次没有 ended_at（那本来就没结束）。用最后一个节点的时间兜底，
+        # 否则界面上「这轮耗时」永远是一条横线，看不出慢在哪。
+        end = t.ended_at or None  # 没结束的轮次落盘是 0.0，不是 None
+        if end is None and t.spans:
+            end = max(s.started_at + s.duration_ms / 1000.0 for s in t.spans)
+        return {
+            "run_id": t.run_id,
+            "status": t.status,
+            "open": not t.ended_at,
+            "category": t.category,
+            "started_at": t.started_at,
+            "ended_at": end,
+            # 两个数分开给：work_ms 是真正算掉的时间，wall_ms 含人工审核那几十分钟的等待。
+            "duration_ms": round(sum(s.duration_ms for s in t.spans)),
+            "wall_ms": round((end - t.started_at) * 1000) if end else None,
+            "tokens": {
+                "prompt": prompt,
+                "completion": completion,
+                "total": prompt + completion,
+                "usage_missing": any(c.usage_missing for c in t.llm_calls),
+            },
+            "nodes": [
+                {
+                    "node": s.name,
+                    "started_at": s.started_at,
+                    "duration_ms": round(s.duration_ms, 1),
+                    "input": s.input_summary,
+                    "output": s.output_summary,
+                    "error": s.error,
+                    "llm": [
+                        {"purpose": c.purpose, "model": c.model, "prompt_tokens": c.prompt_tokens,
+                         "completion_tokens": c.completion_tokens, "latency_ms": round(c.latency_ms, 1),
+                         "usage_missing": c.usage_missing}
+                        for c in s.llm_calls
+                    ],
+                }
+                for s in t.spans
+            ],
+        }
     @app.get("/admin/inflight")
     def admin_inflight(_principal: Principal = Depends(admin_only)) -> dict[str, Any]:
         """started 还没结束的调用，附「有没有活租约」。只看，不动。"""

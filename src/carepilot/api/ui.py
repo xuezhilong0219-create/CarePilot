@@ -231,9 +231,23 @@ main {
 }
 .callout.plain { background: var(--panel); color: var(--muted); border-color: var(--line); }
 .callout b { display: block; margin-bottom: 4px; }
+.tabs { display: flex; gap: 6px; margin: 0 0 10px; }
+.tab { font: inherit; font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); background: transparent; border-radius: 7px; color: var(--muted); cursor: pointer; }
+.tab:hover { border-color: var(--line-strong); color: var(--ink); }
+.tab.on { color: var(--ink); border-color: var(--line-strong); background: var(--panel-2); }
+.span { display: grid; grid-template-columns: 76px minmax(0, 1fr) 58px; gap: 8px; align-items: center; margin: 7px 0 2px; font-size: 12px; }
+.span .nm { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.span .bar { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+.span .bar i { display: block; height: 100%; min-width: 3px; background: var(--accent); }
+.span .ms { text-align: right; font-family: var(--mono); color: var(--muted); }
+.io { margin: 0 0 4px 84px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.io.bad { color: var(--danger); }
 table.audit { width: 100%; border-collapse: collapse; font-size: 11.5px; }
 table.audit td { padding: 5px 4px; border-top: 1px solid var(--line); vertical-align: top; word-break: break-word; }
 table.audit tr:first-child td { border-top: 0; }
+table.audit .badge { white-space: nowrap; }
+table.audit td:nth-child(2) { white-space: nowrap; }
+table.audit td:nth-child(2) .mono { white-space: nowrap; }
 table.audit td.k { color: var(--muted); white-space: nowrap; font-family: var(--mono); }
 
 /* ---------------------------------------------------------------- 弹层 */
@@ -719,50 +733,119 @@ function renderSide(view) {
   }
 
   const sec3 = el("section");
-  sec3.append(el("h4", null, "交接与审计"));
-  const bar = el("div", "actions");
-  const hb = el("button", "ghost", "交接摘要");
-  const ab = el("button", "ghost", "审计流水");
-  bar.append(hb, ab);
-  sec3.append(bar);
-  const out = el("div");
-  out.style.marginTop = "10px";
-  sec3.append(out);
-  hb.addEventListener("click", async () => {
-    out.replaceChildren(el("div", "empty", "加载中…"));
-    try {
-      const h = await api("/tickets/" + encodeURIComponent(view.ticket.ticket_id) + "/handoff");
-      out.replaceChildren();
-      out.append(el("div", "callout plain", "升级原因：" + (h.escalation_reason || "—")));
-      const done = el("div", "draft", (h.actions_done || []).join("\n") || "（无已执行动作）");
-      done.style.marginTop = "8px";
-      out.append(done);
-      if ((h.open_questions || []).length) {
-        const q = el("div", "draft", h.open_questions.join("\n"));
-        q.style.marginTop = "8px";
-        out.append(q);
-      }
-    } catch (err) { out.replaceChildren(el("div", "empty", err.message)); }
-  });
-  ab.addEventListener("click", async () => {
-    out.replaceChildren(el("div", "empty", "加载中…"));
-    try {
-      const rows = (await api("/tickets/" + encodeURIComponent(view.ticket.ticket_id) + "/audit")).slice(-40);
-      const table = el("table", "audit");
-      for (const row of rows) {
-        const tr = el("tr");
-        const when = typeof row.ts === "number" ? new Date(row.ts * 1000).toLocaleTimeString() : "—";
-        tr.append(el("td", "k", when));
-        const td = el("td");
-        td.append(el("b", null, (row.decision || "") + " " + (row.tool || "")));
-        td.append(document.createTextNode(" " + (row.gate && row.gate !== "none" ? "[" + row.gate + "] " : "") + (row.args_summary || row.code || "")));
-        tr.append(td);
-        table.append(tr);
-      }
-      out.replaceChildren(table.children.length ? table : el("div", "empty", "还没有审计记录。"));
-    } catch (err) { out.replaceChildren(el("div", "empty", err.message)); }
-  });
+  sec3.append(el("h4", null, "运行与审计"));
+  const tabs = el("div", "tabs");
+  const tabBody = el("div");
+  const loaders = {
+    trace: () => loadTrace(tabBody, view.ticket.ticket_id),
+    handoff: () => loadHandoff(tabBody, view.ticket.ticket_id),
+    audit: () => loadAudit(tabBody, view.ticket.ticket_id),
+  };
+  for (const [name, label] of [["trace", "轨迹"], ["handoff", "交接"], ["audit", "审计"]]) {
+    const b = el("button", "tab", label);
+    b.setAttribute("data-tab", name);
+    b.addEventListener("click", () => {
+      for (const other of tabs.children) other.classList.toggle("on", other === b);
+      loaders[name]();
+    });
+    tabs.append(b);
+  }
+  sec3.append(tabs, tabBody);
   side.append(sec3);
+  /* 轨迹是本地文件，打开就拉；交接和审计点开才拉 */
+  tabs.children[0].classList.add("on");
+  loadTrace(tabBody, view.ticket.ticket_id);
+}
+
+/* ------------------------------------------------------------- 运行与审计 */
+const DECISION_TONE = { executed: "run", approved: "run", confirmed: "run", needs_approval: "wait", rejected: "bad", error: "bad" };
+
+function dur(ms) {
+  if (typeof ms !== "number") return "—";
+  return ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : Math.round(ms) + " ms";
+}
+
+function when(ts) {
+  return typeof ts === "number" ? new Date(ts * 1000).toLocaleTimeString() : "—";
+}
+
+async function loadTrace(box, ticketId) {
+  box.replaceChildren(el("div", "empty", "加载中…"));
+  let t;
+  try { t = await api("/tickets/" + encodeURIComponent(ticketId) + "/trace"); }
+  catch (err) { box.replaceChildren(el("div", "empty", err.message)); return; }
+  const out = el("div");
+  const kv = el("dl", "kv");
+  kv.append(el("dt", null, "算力"), el("dd", null, dur(t.duration_ms)));
+  if (t.wall_ms && t.wall_ms > t.duration_ms * 1.5) {
+    kv.append(el("dt", null, "全程"), el("dd", null, dur(t.wall_ms) + (t.open ? "（含等人工审核）" : "")));
+  }
+  kv.append(el("dt", null, "token"), el("dd", "mono", t.tokens.total + "（" + t.tokens.prompt + " 进 / " + t.tokens.completion + " 出）"));
+  kv.append(el("dt", null, "状态"), el("dd", "mono", t.status || "—"));
+  out.append(kv);
+  if (t.tokens.usage_missing) out.append(el("div", "empty", "网关没返回 usage：token 只统计到有返回的那几次。"));
+  const nodes = t.nodes || [];
+  const max = Math.max(1, ...nodes.map((n) => n.duration_ms || 0));
+  for (const n of nodes) {
+    const row = el("div", "span");
+    const bar = el("span", "bar");
+    const fill = el("i");
+    fill.style.width = Math.max(2, Math.round(((n.duration_ms || 0) / max) * 100)) + "%";
+    bar.append(fill);
+    row.append(el("span", "nm", STEP_LABEL[n.node] || n.node), bar, el("span", "ms", dur(n.duration_ms)));
+    out.append(row);
+    if (n.error) out.append(el("div", "io bad", n.error));
+    else if (n.output && String(n.output) !== "{}") {
+      out.append(el("div", "io", String(n.output).replace(/ reason=None$/, "").slice(0, 90)));
+    }
+  }
+  if (!nodes.length) out.append(el("div", "empty", "这一轮还没有节点记录。"));
+  box.replaceChildren(out);
+}
+
+async function loadHandoff(box, ticketId) {
+  box.replaceChildren(el("div", "empty", "加载中…"));
+  let h;
+  try { h = await api("/tickets/" + encodeURIComponent(ticketId) + "/handoff"); }
+  catch (err) { box.replaceChildren(el("div", "empty", err.message)); return; }
+  const out = el("div");
+  out.append(el("div", "callout plain", "升级原因：" + (h.escalation_reason || "—")));
+  const done = el("div", "draft", (h.actions_done || []).join("\n") || "（无已执行动作）");
+  done.style.marginTop = "8px";
+  out.append(done);
+  if ((h.open_questions || []).length) {
+    const q = el("div", "draft", h.open_questions.join("\n"));
+    q.style.marginTop = "8px";
+    out.append(q);
+  }
+  box.replaceChildren(out);
+}
+
+async function loadAudit(box, ticketId) {
+  box.replaceChildren(el("div", "empty", "加载中…"));
+  let rows;
+  try { rows = await api("/tickets/" + encodeURIComponent(ticketId) + "/audit"); }
+  catch (err) { box.replaceChildren(el("div", "empty", err.message)); return; }
+  rows = (rows || []).slice(-40);
+  const table = el("table", "audit");
+  for (const row of rows) {
+    const tr = el("tr");
+    tr.append(el("td", "k", when(row.ts)));
+    const td = el("td");
+    const badge = el("span", "badge", row.decision || "—");
+    badge.setAttribute("data-tone", DECISION_TONE[row.decision] || "run");
+    td.append(badge);
+    if (row.tool) {
+      const t = el("div", "mono", row.tool);
+      t.style.fontSize = "11px";
+      t.style.marginTop = "2px";
+      td.append(t);
+    }
+    tr.append(td);
+    tr.append(el("td", null, row.args_summary || row.code || ""));
+    table.append(tr);
+  }
+  box.replaceChildren(table.children.length ? table : el("div", "empty", "还没有审计记录。"));
 }
 
 /* ------------------------------------------------------------- 动作 */

@@ -281,3 +281,36 @@ def test_sweeper_stays_off_by_default(tmp_path):
     app, *_ = build(tmp_path, make_triage(), make_draft())
     with TestClient(app):
         assert getattr(app.state, "sweeper", None) is None
+
+def test_trace_is_staff_only(tmp_path):
+    app, *_ = build(tmp_path, DATA_EXC(), make_draft(cited_ids=["1"]), ToolPlan(tool="none"))
+    with TestClient(app) as c:
+        tid = c.post("/tickets", json={"message": "账单金额不对"}, headers=H("c1")).json()["ticket"]["ticket_id"]
+        assert c.get(f"/tickets/{tid}/trace").status_code == 401
+        assert c.get(f"/tickets/{tid}/trace", headers=H("c1")).status_code == 403
+        assert c.get(f"/tickets/{tid}/trace", headers=H("a1")).status_code == 200
+
+
+def test_trace_lists_each_node_with_its_time_and_tokens(tmp_path):
+    app, *_ = build(tmp_path, DATA_EXC(), make_draft(cited_ids=["1"]), ToolPlan(tool="none"))
+    with TestClient(app) as c:
+        tid = c.post("/tickets", json={"message": "账单金额不对"}, headers=H("c1")).json()["ticket"]["ticket_id"]
+        t = c.get(f"/tickets/{tid}/trace", headers=H("a1")).json()
+        names = [n["node"] for n in t["nodes"]]
+        assert "classify" in names and "human_review" in names  # 跑过的节点都留了记录
+        assert all(isinstance(n["duration_ms"], (int, float)) and n["duration_ms"] >= 0 for n in t["nodes"])
+        assert t["run_id"] and t["status"] == "awaiting_review"
+        assert t["tokens"]["total"] == t["tokens"]["prompt"] + t["tokens"]["completion"]
+        assert isinstance(t["tokens"]["usage_missing"], bool)
+        # 停在等待审核的轮次落盘的 ended_at 是 0.0，接口要给一个能看的耗时
+        assert t["open"] is True
+        assert t["duration_ms"] >= 0  # 假模型瞬间返回，算力时间可能就是 0
+        assert t["wall_ms"] >= t["duration_ms"]  # 全程不会比算力短
+        assert t["ended_at"] >= t["started_at"]
+        assert all(isinstance(n["llm"], list) for n in t["nodes"])  # 假模型不产生 usage，但结构要在
+
+
+def test_trace_is_404_for_a_ticket_that_never_ran(tmp_path):
+    app, *_ = build(tmp_path, DATA_EXC(), make_draft(), ToolPlan(tool="none"))
+    with TestClient(app) as c:
+        assert c.get("/tickets/T-000404/trace", headers=H("a1")).status_code == 404

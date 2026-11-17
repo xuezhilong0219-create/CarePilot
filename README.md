@@ -162,7 +162,10 @@ uv run uvicorn carepilot.api.app:app --port 8000
 1. 客户点「＋ 新建」，写下问题；提交后中间栏逐个亮起节点（分诊 → 检索 → 起草 → 待审核），亮的是真的 SSE 事件，不是假进度条。
 2. 切到 `a1`，右侧出现**待审核**：草稿全文、引用卡片（点开看知识库原文）、审核备注输入框。
 3. 点「通过并发送」→ 工单变成**待二次确认**，右侧出现确认卡片；再点「确认发送（真实动作）」→ 消息进会话、工单置 `resolved`。
-4. 「交接摘要」「审计流水」懒加载后端的 `/handoff` 与 `/audit`，审计里能看到 `needs_approval → approved → confirmed → executed` 这一串。
+4. 右侧「运行与审计」三个 tab：**轨迹**（打开就加载，读本地文件）、**交接**、**审计**。轨迹是这一轮每个节点一行：横条长度 = 该节点耗时占最慢节点的比例，旁边是毫秒数和节点输出摘要；顶部给「算力」和「全程」两个数——`T-000001` 是 61.41 s 算力 / 762.69 s 全程，差的七百秒是在等人审核，所以这两个数必须分开给，合在一起就成了一个既不是延迟也不是工时的数。token 显示 `1862（972 进 / 890 出）`；网关没给 usage 时明确写「只统计到有返回的那几次」，不估。
+5. **审计** tab 是表格：时间 / 决策徽章（`needs_approval` 黄、`executed` 绿、`rejected` 红）/ 工具 / 参数摘要，一眼看到 `needs_approval → approved → confirmed → executed → set_ticket_status` 这一串。
+
+轨迹读的是磁盘上已经落好的 trace JSON（`GET /tickets/{id}/trace`，仅坐席），不重跑图、也不碰账本——点多少次都没有副作用。
 
 升级卡（知识库答不了、要查账单）在界面上是「建议升级 + 升级原因」，按钮变成「确认升级」，没有二次确认的发送——因为根本没有对外发送这一步。
 
@@ -367,7 +370,7 @@ src/carepilot/
 eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账、latency_profile.py=延迟账、ttft_probe.py=首字延迟
 scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py、check_viewer.py（无头浏览器验查看器）
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            694 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
+tests/            697 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
 ```
 
 ## 配置
