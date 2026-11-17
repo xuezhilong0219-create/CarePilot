@@ -591,8 +591,16 @@ function renderComposer(view) {
   const form = $("composer");
   const isCustomer = state.role === "customer";
   const closed = !!(view && view.ticket && view.ticket.status === "closed");
+  // 等二次确认时再发一句会开新一轮，把网关里那条已批准的发送变成点不开的孤儿——后端也拒（409），
+  // 这里顺手置灰。等审核时不禁：那一轮只是个 interrupt，开新一轮不会留下卸不掉的东西。
+  const waiting = !!(view && view.status === "awaiting_confirmation");
   form.hidden = !view || !isCustomer || closed;
-  $("hint").textContent = closed ? "工单已关闭" : "消息会立刻进入自动处理流程";
+  $("message").disabled = waiting;
+  $("send").disabled = waiting;
+  $("hint").textContent = closed ? "工单已关闭"
+    : waiting ? "回复已写好，等坐席最后确认；这期间先别发新消息"
+    : view && view.status === "awaiting_review" ? "坐席正在看这一轮；再发一句会开新一轮，这张卡会被取代"
+    : "消息会立刻进入自动处理流程";
 }
 
 /* ------------------------------------------------------------- 渲染：处理台 */
@@ -995,12 +1003,14 @@ function boot() {
     if (!text || !state.ticketId) return;
     const button = $("send");
     await runAction(button, async () => {
-      $("message").value = "";
+      // 先别清空：发送失败（比如后端 409 说还在等人）时，用户打的字得还在。
       const result = await stream("/tickets/" + encodeURIComponent(state.ticketId) + "/messages?stream=true", { message: text },
         (ev, payload) => { if (payload.node) { state.lastNodes = state.lastNodes.concat(payload); renderProgress(state.lastNodes); } });
+      if (result) $("message").value = "";
       if (result) applyView(result);
       loadTickets(state.ticketId);
     });
+    renderComposer(state.view);  // runAction 会把按钮重新启用，等人时得再按回去
   });
   $("message").addEventListener("keydown", (ev) => {
     if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") $("composer").requestSubmit();

@@ -172,6 +172,18 @@ def register_governed(app: FastAPI) -> None:
             out["abort_reason"] = values.get("escalate_reason") if workflow == "needs_human" else None
         return out
 
+    def _pending_send(ticket_id: str) -> bool:
+        """这张单是不是有一条已经批准、等坐席二次确认的回复。
+
+        这种状态下工单背后有一个网关里的待确认审批（approval_id）。客户再发一句会开新一轮，确认入口跟着 last_thread_id 走，那条审批就再也没人点得开——所以这里拦住。
+        """
+        store, graph = app.state.store, app.state.graph
+        thread_id = store.get_context(ticket_id)["last_thread_id"]
+        if not thread_id:
+            return False
+        status = dict(graph.get_state(thread_config(thread_id)).values).get("status")
+        return status == "awaiting_confirmation"
+
     def tracer_for(thread_id: str, ticket_id: str) -> RunTracer:
         """同一个 run 跨审核阶段共用一个 tracer；进程重启后从磁盘上的 trace 续写，不覆盖之前的节点。"""
         runs = app.state.runs
@@ -283,6 +295,10 @@ def register_governed(app: FastAPI) -> None:
             raise HTTPException(403, "only the ticket's customer can add customer messages")
         if ticket.status == "closed":
             raise Conflict("ticket is closed")
+        # 等二次确认时再发一句会开新一轮，网关里那条已批准的发送就再也没人点得开（孤儿审批）。
+        # 等审核时不管：那一轮只是图停在一个 interrupt 上，开新一轮不会留下卸不掉的东西。
+        if _pending_send(ticket_id):
+            raise Conflict("ticket is awaiting_confirmation; wait for the agent to send or discard")
         return run_turn(principal, ticket, body.message.strip(), stream=stream)
 
     @app.get("/tickets")

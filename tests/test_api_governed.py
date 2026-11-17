@@ -82,6 +82,21 @@ def test_customers_cannot_see_each_others_tickets_and_unknown_is_404(tmp_path):
         assert [t["ticket_id"] for t in c.get("/tickets", headers=H("a1")).json()] == [tid]
 
 
+def test_customer_cannot_open_a_new_round_while_the_reply_waits_for_confirmation(tmp_path):
+    """等二次确认时再发一句会开新一轮，网关里那条已批准的发送就再也没人点得开。"""
+    world = build_world(7)
+    mine = own_order(world)
+    app, *_ = build(tmp_path, DATA_EXC(), make_draft(reply="订单已发出。", cited_ids=["1"]),
+                    [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
+    with TestClient(app) as c:
+        tid = c.post("/tickets", json={"message": f"帮我查订单 {mine.order_id}"}, headers=H("c1")).json()["ticket"]["ticket_id"]
+        r = c.post(f"/tickets/{tid}/review", json={"action": "approve"}, headers=H("a1")).json()
+        assert r["status"] == "awaiting_confirmation"
+        denied = c.post(f"/tickets/{tid}/messages", json={"message": "还在吗"}, headers=H("c1"))
+        assert denied.status_code == 409 and "awaiting_confirmation" in denied.json()["detail"]
+        assert [m["body"] for m in c.get(f"/tickets/{tid}", headers=H("c1")).json()["messages"]] == [f"帮我查订单 {mine.order_id}"]
+        assert c.post(f"/tickets/{tid}/confirm", headers=H("a1")).json()["ticket"]["status"] == "resolved"
+
 def test_customer_cannot_use_staff_endpoints(tmp_path):
     app, *_ = build(tmp_path, DATA_EXC(), make_draft(), ToolPlan(tool="none"))
     with TestClient(app) as c:

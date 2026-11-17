@@ -61,7 +61,10 @@ KB_DIR=data/kb_real uv run uvicorn carepilot.api.app:app --port 8000
 1. 点「**＋ 新建**」，写一句话，例如：`企业中台导出订单时报错「库存同步失败」，导不出来，麻烦看下怎么处理`。
 2. 中间栏会逐个亮起节点：分诊 → 检索 → 起草 → 待审核。**亮的是真的 SSE 事件**（每个节点跑完推一条），不是假进度条。
 3. 等整轮跑完，右侧会显示「系统正在处理…」；等坐席处理完，回复才会出现在会话里。
+   如果这一轮变成「待人工审核」，右侧会改口说「等待人工确认 / 正在等坐席确认后回复你」——它不是卡住，是在等人。
 4. 想接着追问，直接在底部输入框发——历史和已识别的平台/店铺/功能会带进下一轮。
+   注意：**等审核期间再发一句会开新一轮，坐席正在看的那张卡会被新一轮取代**（提示语会这么说）；
+   **等二次确认期间发不出去**（输入框置灰、接口 409），因为那一刻网关里有一条已批准的发送，开新一轮会让它变成没人点得开的孤儿审批。
 
 ### 坐席视角（a1）
 
@@ -246,10 +249,13 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.Co
 `uvicorn` 不加 `--reload` 时改 `ui.py` 必须重启；`taskkill //F` 在 Git Bash 里会报参数错误，用 `Stop-Process -Force`。
 
 **返回 409 是什么意思**
-全是业务状态冲突，不是崩了：`ticket is not awaiting review`（这张单现在没有待审核的东西）、`nothing to confirm`（没有待确认的发送）、`ticket is closed`、`approval_not_pending`（这个审批已经被处理过）、`reconciliation_required`（同一幂等键有一次没跑完，需要先对账）。
+全是业务状态冲突，不是崩了：`ticket is not awaiting review`（这张单现在没有待审核的东西）、`nothing to confirm`（没有待确认的发送）、`ticket is closed`、`ticket is awaiting_confirmation; wait for the agent to send or discard`、`approval_not_pending`（这个审批已经被处理过）、`reconciliation_required`（同一幂等键有一次没跑完，需要先对账）。
 
 **重复点「确认发送」会不会发两遍**
 不会。`POST /confirm` 是幂等的：网关按幂等键回放上一次结果，审计里能看到 `replayed`。端到端测过重复确认 3 次只产生 1 条消息。
+
+**为什么等二次确认时不能发新消息**
+那一刻网关里躺着一条已批准的发送（`approval_id`），确认入口跟着工单的 `last_thread_id` 走。客户此时再发一句会开新一轮、把 `last_thread_id` 换掉，那条审批就再也没人点得开（要等 24 小时 TTL 过期）。所以 `POST /tickets/{id}/messages` 在这个状态下返回 409，界面上输入框也置灰。等审核（`awaiting_review`）不禁：那一轮只是图停在一个 interrupt 上，开新一轮不会留下卸不掉的东西。
 
 **升级卡为什么没有二次确认**
 因为升级没有「对外发送」这一步，`approve` 直接执行 `escalate_ticket`。这时再调 `/confirm` 返回 409 是正常的。
