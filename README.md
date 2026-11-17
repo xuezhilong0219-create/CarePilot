@@ -271,6 +271,25 @@ curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=30
 定时扫描默认**关闭**（`RECONCILE_INTERVAL_S=0`）：对账可能认领一条副作用并记成 `done`，是写库动作，开不开该由部署环境决定；`docker compose` 里默认打开（间隔 60 s、只处理 300 s 以前的）。两个入口都是管理员专属，13 条测试钉住「在飞的不碰、太新的不碰、dry run 什么都不写」。
 
 
+### 延迟：时间花在模型上，不在网关
+
+`uv run python eval/latency_profile.py --limit 40`（可答样本里等距抽 40 条，串行跑，BM25，2026-11-17）：
+
+| 节点 | 样本 | p50 | p95 | 均值 | 最大 |
+|---|---|---|---|---|---|
+| 分诊 classify | 40 | 2.98 s | 4.45 s | 2.93 s | 5.72 s |
+| 检索 retrieve | 40 | 1 ms | 2 ms | 1 ms | 4 ms |
+| 起草 draft_reply | 40 | 3.01 s | 6.14 s | 3.19 s | 8.25 s |
+| 整单 total | 40 | 6.01 s | 8.95 s | 6.12 s | 10.42 s |
+| 模型调用合计 | 40 | 6.01 s | 8.95 s | 6.12 s | 10.42 s |
+| 本地计算（检索/渲染/记账） | 40 | 1 ms | 2 ms | 1 ms | 4 ms |
+
+- **两次模型调用就是整单**：分诊 2.98 s + 起草 3.01 s ≈ 整单 6.01 s，本地那点工作被四舍五入掉了（p50 1 ms）。
+- **检索不是瓶颈**：BM25 全库打分 p50 1 ms、p95 2 ms。这也是没有上向量库的理由之一——换掉它省不下时间，只会多出延迟。
+- **网关不在这条路径上**：这 40 条都是单轮可答样本，一次工具都没调。网关自身的成本在 `bench_gateway.py` 里单独量过：16 次调用 0.25 s，扣掉假工具那 100 ms，每次约 16 ms（含线程调度）。
+- **口径**：串行跑（`--concurrency 1`）。并发会让请求在模型侧排队，测出来的就不是「一次要多久」而是「排队多久」。只在这台机器、当天、这个网关上量过；换个模型或网关繁忙时段，绝对值会变，比例不会。
+- 明细留在 `eval/real/reports/latency/*.items.jsonl`，`--from-items` 可以拿它换统计口径重算，不用再调一次模型。
+
 ## 局限（面试前要先讲清楚）
 
 - **评估集是 LLM 用文档反向合成的**，问题用词天然偏近原文，BM25 的数字偏乐观。我抽查过一部分，没有逐条人工审核。真实工单上的表现需要真实数据验证。
@@ -280,10 +299,10 @@ curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=30
 - `笼统消息` 的 40 条是我手写的，前 20 条和分诊提示词里的示例有重合，后 20 条是之后新写的、未出现在提示词里，两批结果都是 19/20 和 20/20 追问。
 - **订单、物流、店铺是合成的沙箱数据**，不是真实系统；**角色靠请求头模拟，没有密码或令牌**，不能直接上线。审计表没有防篡改。
 - 工具选择和注入评测的用例都是模板，比真实客户规整。
-- **单次模型调用耗时随网关负载变化很大**：评估时整单约 3 秒，一次真实走查里单次调用 p50 7.7 秒、最大 20 秒。文档里的耗时数字对"网关繁忙"没有代表性。
+- **单次模型调用耗时随网关负载变化很大**：40 条串行实测整单 p50 6.01 s / p95 8.95 s，同一天另一次真实走查里单次调用 p50 7.7 s、最大 20 s。文档里的耗时数字对"网关繁忙"没有代表性，别当 SLA。
 - ~~Docker 镜像没有构建过~~ **已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器）：`docker build` 退出码 0，镜像 714 MB；容器以 `app` 用户启动、健康检查 `healthy`、`/health` 返回 `{"ok":true}`；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 和 `traces/`（那条按推理加的 chown **成立且必需**，删掉会 `PermissionError`）；无 `X-User-Id` 请求 `/tickets` 返回 401；`docker compose config` 解析通过。
 - 构建侧的环境坑（不是项目问题）：国内直连 Docker Hub 超时，且 `# syntax=docker/dockerfile:1` 的 frontend 解析发生在 **buildx 客户端进程**里，不吃 daemon 的代理配置——必须给 `docker build` 命令本身设 `HTTP(S)_PROXY`。
-- **并发只在网关这一层量过**：`eval/bench_gateway.py` 用的是假工具、单机、8 个进程，没有做端到端压测——真实链路上的一秒级延迟来自模型，不来自网关，两者不该混在一起说。trace 查看器只做了静态检查和 XSS 载荷测试，没在真实浏览器里点过。
+- **并发只在网关这一层量过**：`eval/bench_gateway.py` 用的是假工具、单机、8 个进程，没有做端到端压测。延迟的分解已经量过（见上面「延迟」一节：模型 p50 6.01 s、本地 p50 1 ms），但那是串行单机的一次采样，不是容量结论。trace 查看器只做了静态检查和 XSS 载荷测试，没在真实浏览器里点过。
 - **MCP 通道没有认证**，身份由 `--user` 启动参数指定，连上来的客户端可以声称是任何人。只读工具在 MCP 上会直接执行；写操作拿不到批准，因为这条通道上没有人能批准。
 - **MCP 只做了 server 方向**：本项目把工具暴露给别的 agent，反过来「用别人的 MCP 工具」还没接进规划节点（规划器的工具集是固定的五个只读工具）。
 - 向量索引离线构建约 20 分钟（2.2 万个 chunk，CPU），本项目没有做增量更新。
@@ -305,10 +324,10 @@ src/carepilot/
   evaluation/     指标、运行器、评估集生成、工具选择/注入评测
   api/            FastAPI：app.py（演示模式）、governed.py（治理模式）
   auth.py         角色与调用者身份（请求头模拟）
-eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账
+eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账、latency_profile.py=延迟账
 scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            674 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口）
+tests/            681 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口）
 ```
 
 ## 配置
