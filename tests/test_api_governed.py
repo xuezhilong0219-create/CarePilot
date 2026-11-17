@@ -314,3 +314,39 @@ def test_trace_is_404_for_a_ticket_that_never_ran(tmp_path):
     app, *_ = build(tmp_path, DATA_EXC(), make_draft(), ToolPlan(tool="none"))
     with TestClient(app) as c:
         assert c.get("/tickets/T-000404/trace", headers=H("a1")).status_code == 404
+
+
+def test_traces_lists_every_round_of_a_ticket(tmp_path):
+    rounds = ScriptedInvoker([DATA_EXC(), DATA_EXC()])
+    plans = ScriptedInvoker([ToolPlan(tool="none")] * 2)
+    app, *_ = build(tmp_path, rounds, make_draft(cited_ids=["1"]), plans)
+    with TestClient(app) as c:
+        tid = c.post("/tickets", json={"message": "账单金额不对"}, headers=H("c1")).json()["ticket"]["ticket_id"]
+        c.post(f"/tickets/{tid}/messages", json={"message": "补充一下，是导出的时候报错"}, headers=H("c1"))
+        runs = c.get(f"/tickets/{tid}/traces", headers=H("a1")).json()["runs"]
+        assert len(runs) == 2  # 每次客户发消息都是一轮，一轮一个 trace 文件
+        assert len({r["run_id"] for r in runs}) == 2
+        assert [r["started_at"] for r in runs] == sorted((r["started_at"] for r in runs), reverse=True)
+        assert all("ticket_id" not in r for r in runs)  # 列表只给摘要，不带内部字段
+        assert all(r["nodes"] > 0 for r in runs)
+
+
+def test_trace_can_open_an_older_round_and_refuses_another_ticket_run(tmp_path):
+    rounds = ScriptedInvoker([DATA_EXC(), DATA_EXC(), DATA_EXC()])
+    plans = ScriptedInvoker([ToolPlan(tool="none")] * 3)
+    app, *_ = build(tmp_path, rounds, make_draft(cited_ids=["1"]), plans)
+    with TestClient(app) as c:
+        tid = c.post("/tickets", json={"message": "账单金额不对"}, headers=H("c1")).json()["ticket"]["ticket_id"]
+        first = c.get(f"/tickets/{tid}/trace", headers=H("a1")).json()["run_id"]
+        c.post(f"/tickets/{tid}/messages", json={"message": "补充一下，是导出的时候报错"}, headers=H("c1"))
+        latest = c.get(f"/tickets/{tid}/trace", headers=H("a1")).json()["run_id"]
+        assert latest != first  # 不指定就取最近一轮
+
+        older = c.get(f"/tickets/{tid}/trace?run_id={first}", headers=H("a1"))
+        assert older.status_code == 200 and older.json()["run_id"] == first
+
+        other = c.post("/tickets", json={"message": "订单不能导出"}, headers=H("c3")).json()["ticket"]["ticket_id"]
+        other_run = c.get(f"/tickets/{other}/trace", headers=H("a1")).json()["run_id"]
+        # 别人的 run_id 不能串门
+        assert c.get(f"/tickets/{tid}/trace?run_id={other_run}", headers=H("a1")).status_code == 404
+        assert c.get(f"/tickets/{tid}/trace?run_id=../../etc/passwd", headers=H("a1")).status_code == 404

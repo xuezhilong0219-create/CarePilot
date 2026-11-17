@@ -49,7 +49,7 @@ def test_index_serves_a_self_contained_page(tmp_path):
         assert res.headers["content-type"].startswith("text/html")
         body = res.text
         # 「运行轨迹」是页面上真有的 tab，不是只有接口
-        for marker in ('id="tickets"', 'id="messages"', 'id="side"', '"tab"', "loadTrace", "CarePilot"):
+        for marker in ('id="tickets"', 'id="messages"', 'id="side"', '"tab"', "loadTrace", "/traces", "CarePilot"):
             assert marker in body
         # 页面上没有任何外部资源：CSP 里也把 default-src 收成 none
         assert "http://" not in body and "https://" not in body

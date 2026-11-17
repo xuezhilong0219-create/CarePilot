@@ -235,6 +235,7 @@ main {
 .tab { font: inherit; font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); background: transparent; border-radius: 7px; color: var(--muted); cursor: pointer; }
 .tab:hover { border-color: var(--line-strong); color: var(--ink); }
 .tab.on { color: var(--ink); border-color: var(--line-strong); background: var(--panel-2); }
+select.rounds { width: 100%; margin: 0 0 8px; padding: 4px 6px; font: inherit; font-size: 11.5px; font-family: var(--mono); color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; }
 .span { display: grid; grid-template-columns: 76px minmax(0, 1fr) 58px; gap: 8px; align-items: center; margin: 7px 0 2px; font-size: 12px; }
 .span .nm { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .span .bar { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
@@ -769,13 +770,30 @@ function when(ts) {
   return typeof ts === "number" ? new Date(ts * 1000).toLocaleTimeString() : "—";
 }
 
-async function loadTrace(box, ticketId) {
+async function loadTrace(box, ticketId, runId) {
   box.replaceChildren(el("div", "empty", "加载中…"));
+  let runs = [];
+  try { runs = (await api("/tickets/" + encodeURIComponent(ticketId) + "/traces")).runs || []; }
+  catch (err) { box.replaceChildren(el("div", "empty", err.message)); return; }
+  const chosen = runId || (runs[0] && runs[0].run_id);
   let t;
-  try { t = await api("/tickets/" + encodeURIComponent(ticketId) + "/trace"); }
+  try { t = await api("/tickets/" + encodeURIComponent(ticketId) + "/trace" + (chosen ? "?run_id=" + encodeURIComponent(chosen) : "")); }
   catch (err) { box.replaceChildren(el("div", "empty", err.message)); return; }
   const out = el("div");
+  if (runs.length > 1) {
+    /* 一单会被客户追问很多轮，每轮一个 trace 文件；默认看最近一轮，可往回翻。 */
+    const pick = el("select", "rounds");
+    runs.forEach((r, i) => {
+      const o = el("option", null, "第 " + (runs.length - i) + " 轮 · " + when(r.started_at) + " · " + (r.status || "—"));
+      o.value = r.run_id;
+      o.selected = r.run_id === chosen;
+      pick.append(o);
+    });
+    pick.addEventListener("change", () => loadTrace(box, ticketId, pick.value));
+    out.append(pick);
+  }
   const kv = el("dl", "kv");
+
   kv.append(el("dt", null, "算力"), el("dd", null, dur(t.duration_ms)));
   if (t.wall_ms && t.wall_ms > t.duration_ms * 1.5) {
     kv.append(el("dt", null, "全程"), el("dd", null, dur(t.wall_ms) + (t.open ? "（含等人工审核）" : "")));

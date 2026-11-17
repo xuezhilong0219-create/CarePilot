@@ -194,6 +194,15 @@ class TraceStore:
     def load_all(self) -> list[RunTrace]:
         return [self.load(run_id) for run_id in self.list_runs()]
 
+    def runs_for(self, ticket_id: str) -> list[RunTrace]:
+        """这张工单跑过的每一轮，按开始时间倒序。
+
+        每次调用都要把目录里的 JSON 读一遍 —— 演示规模（几十个文件）够用，
+        真上线要换成按 ticket_id 建索引文件，否则 O(全部轨迹)。
+        """
+        runs = [t for t in self.load_all() if t.ticket_id == ticket_id]
+        return sorted(runs, key=lambda t: t.started_at, reverse=True)
+
 
 class _NullSpan:
     def set_output(self, text: str | None) -> None:
