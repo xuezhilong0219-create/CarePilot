@@ -144,9 +144,11 @@ curl localhost:8000/tickets/T-000001/audit -H 'X-User-Id: a1'
 curl -N -X POST 'localhost:8000/tickets?stream=true' -H 'X-User-Id: c1' -H 'content-type: application/json' -d '{"message":"..."}'
 ```
 
-审核卡有两种：**回复草稿**（`resolution=auto_reply`）的 `approve` 走"批准 → 二次确认 → 发送"；**升级卡**（`resolution=escalate`，知识库答不了或要查账单）的 `approve` 就是"确认升级"，直接执行 `escalate_ticket`，没有待确认的发送——这时再调 `/confirm` 返回 409 是正常的。后续轮次里系统判断资料不足也会把原来的回复草稿变成升级。
+审核卡有两种：**回复草稿**（`resolution=auto_reply`）的 `approve` 走"批准 → 二次确认 → 发送"；系统自己提的**追问**（`post_followup`）同样是对外发送，所以它也走一遍批准 + 确认（审计里能看到 `approved` / `confirmed`），只是这一步由系统自己批；**升级卡**（`resolution=escalate`，知识库答不了或要查账单）的 `approve` 就是"确认升级"，直接执行 `escalate_ticket`，没有待确认的发送——这时再调 `/confirm` 返回 409 是正常的。后续轮次里系统判断资料不足也会把原来的回复草稿变成升级。
 
 旧的"演示模式"（无身份、mock 工单系统）仍保留：`create_app(governed=False)`。
+
+**详细的功能说明和操作步骤见 [docs/usage.md](docs/usage.md)**：每条链路点什么、会看到什么、常见报错的含义、想改代码从哪个文件进。
 
 每次运行落一份 trace JSON 到 `data/traces/`，用 `uv run python scripts/trace_viewer.py --traces data/traces --out viewer.html` 生成可按节点展开的单文件查看器；成本报表见 `scripts/cost_report.py`（单价需要你自己填 `pricing.json`，不会替你编价格）。一键评测：`python eval/eval_all.py --quick`（本机没有 `make`；Makefile 只是转发）。
 
@@ -186,7 +188,8 @@ uv run python scripts/check.py --skip tests # 只跑 lint，改完一处马上�
 ```
 
 - **为什么是一条脚本，不是 Makefile**：`make` 在 Windows 上默认没有；脚本用 `sys.executable`，三平台一致。`Makefile` 里的 `check` 只是转发到它。
-- **为什么仓库里没有 CI 配置文件**：这个仓库没有 remote（`git remote -v` 为空）。放一个永远不会跑的 workflow 只是装饰。接上 remote 后，job 里就一行 `uv run python scripts/check.py`。
+- **CI 跑的就是这条命令**：`.github/workflows/ci.yml` 只有一个 job，`uv run --no-sync python scripts/check.py`。没有第二套标准，也没有只有 CI 才会红的检查。
+- **一步都没跑不算通过**：`--skip lint,tests` 把两步都跳过时退出码是 2（不是 0），免得「什么都没跑」被当成绿。
 - **lint 规则只挑会和 bug 有关的**：`E4`（未使用导入）、`E7`、`E9`（语法/运行时错误）、`F`（pyflakes）、`B`（bugbear）。忽略 `B008`（FastAPI 把 `Depends(...)` 写在默认值是固有写法）和 `E731`（`eval/` 里用 lambda 做聚合更直接）。
 - **不跑 `ruff format`**：它会把全仓重排一遍，之后每个 diff 都失去信息。格式化是另一件事，没有和"找 bug"绑在一起。
 - 规则开起来当场就找到三个真问题，都不是格式问题：注入评测的**伪造引用检查永远不触发**（调用点把模型写的裸编号拼成了 `doc#N`，跟载荷里的假文档号永远不等，等于那条检查没跑过）；18 处线程/闭包目标捕获循环变量（当前迭代安全，改一次循环就漂）；6 处 `zip()` 没有 `strict=`（长度不一致会静默截断）。这些用"读代码"没看出来，`ruff check .` 一开就点名了。
@@ -333,6 +336,23 @@ curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=30
 - **自由文本确实更快**（整段 p50 1.67 s 对结构化 3.01 s），但这里限了 `--max-tokens 512`、结构化那条没限，差距里有长度差，不能全算成格式开销。真要省时间，先验「模型肯不肯在正文里写 `[n]`」比先改契约划算。
 - 6 条单次采样，不是 SLA。脚本退出码与延迟账一致：没有样本退出 2，正常 0。
 
+## 收尾审查：八个真问题
+
+把仓库交给另一个 agent 做对抗式审查，它改了 15 个文件、加了 14 条测试。八处都不是格式问题：
+
+1. **驳回过的动作能被静默重开**（`gateway.py`）：approval 被 `reject()` 之后，同一个幂等键再被提出，原来落回 `needs_approval`——「已驳回」变成了「再考虑一下」。现在直接 `Rejected(Gate.RISK, "approval_rejected")` 并写一条审计。
+2. **没有店铺范围的客户能给任意店铺建单**（`store/service.py`）：判据写成 `if customer.shop_ids and shop_id not in ...`，空集合直接短路。改成只判 `shop_id not in customer.shop_ids`。
+3. **升级不是原子的**（`store/service.py`）：原来三次独立写（改状态 → 写原因 → 写动作），中途失败留下半截、重试写两遍。现在 `_record_escalation` 一个 `BEGIN IMMEDIATE` 事务写完，两条内部消息各带幂等键（`{idem_key}:reason` / `:actions`），同键不同内容抛 `Conflict`；`escalate_verify` 要两条消息都对得上才算副作用已发生。
+4. **追问是发给客户的，却按内部写处理**（`toolbox.py`）：`post_followup` 从 `WRITE_INTERNAL` 提到 `EXTERNAL_SEND`——它真的会出现在客户会话里。系统自己提的追问走「系统自批 → 确认」，审计里因此多了 `approved` / `confirmed`；走 MCP 通道时则停在 `needs_approval`。
+5. **平台对接类问题不查店铺授权**（`nodes.retrieve`）：原来要求平台名和店铺名同时存在才查，客户没提店名就跳过。现在这类问题一定查；客户没写店名就用**工单关联的店铺**——那是可信上下文，不是模型抽出来的字符串。
+6. **规划器给的店名被丢掉**（`nodes.plan_tools`）：取值元组漏了 `shop_name`，按店铺名查授权的路径永远缺参数。
+7. **一条工具降级、另一条成功时照常起草**（`nodes.plan_tools`）：物流查不到但订单查到了，原来整体判 ok，把缺失当成没发生。现在只要有一条 `unavailable` 就走确定性降级文案，不经模型。
+8. **声称通知了没通知的团队**（`nodes.route_escalation`）：`escalate_ticket` 只收一个 team，代码却把 `oncall` 追加进原因文本，变成「已同时通知 oncall」的假话。删掉。
+
+另有三处小修：`reply_edited` 进 `build_view`（人工改过的回复不再挂着原引用，审计里标 `edited_by_human`）；纯空白消息在 API 层直接 422；`scripts/check.py` 一步都没跑时退出码 2。
+
+验证：`scripts/check.py` → ruff 全绿 + **713 passed**；44 条真实链路冒烟（独立数据目录、真实模型、逐条断言）全过；`eval_all.py --quick` → 答对率 0.846 / 拒答准确率 1.000 / 工具选择 1.000 / 泄露 0。
+
 ## 局限（面试前要先讲清楚）
 
 - **评估集是 LLM 用文档反向合成的**，问题用词天然偏近原文，BM25 的数字偏乐观。我抽查过一部分，没有逐条人工审核。真实工单上的表现需要真实数据验证。
@@ -370,7 +390,7 @@ src/carepilot/
 eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账、latency_profile.py=延迟账、ttft_probe.py=首字延迟
 scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py、check_viewer.py（无头浏览器验查看器）
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            699 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
+tests/            713 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
 ```
 
 ## 配置

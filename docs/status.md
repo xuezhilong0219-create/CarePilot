@@ -26,7 +26,7 @@
 | B5 改工单状态需人工确认，非法迁移拦截 | ✅ | 状态机 7×7 全部迁移参数化测试；网关规则闸拦截非法迁移；批准前不执行 |
 | B6 对外发送二次确认 + 幂等 | ✅ | 批准后客户收不到消息；重复确认 3 次只产生 1 条消息（图层和 HTTP 层都测了） |
 | B7 升级转人工，写原因和已完成动作，下个坐席可接续 | ✅ | `/handoff` 返回原因（含转交团队）、审计里已执行的动作、客户最后一句话；释放后另一坐席可认领 |
-| B8 质量门禁（lint + 全量测试一条命令） | ✅ | `uv run python scripts/check.py`：`ruff check .` 全绿（E4/E7/E9/F/B，忽略 B008/E731）+ `pytest` 656 passed。开起来当场修掉 1 个真 bug（注入判分器的伪造引用检查因为调用点拼了 `doc#N` 而永不触发）与 24 处潜在问题（18 处闭包捕获循环变量、6 处 `zip` 无 `strict`）。**没有 CI**：本仓库没有 remote，写 `.github/workflows/` 只是装饰，接上 remote 后把这条命令放进 job 即可。不跑 `ruff format`：全仓重排会让 diff 失去信息 |
+| B8 质量门禁（lint + 全量测试一条命令） | ✅ | `uv run python scripts/check.py`：`ruff check .` 全绿（E4/E7/E9/F/B，忽略 B008/E731）+ `pytest` 713 passed。开起来当场修掉 1 个真 bug（注入判分器的伪造引用检查因为调用点拼了 `doc#N` 而永不触发）与 24 处潜在问题（18 处闭包捕获循环变量、6 处 `zip` 无 `strict`）。CI 已接（`.github/workflows/ci.yml` 只跑这一条命令）；`--skip` 把两步都跳过时退出码 2，不会「没跑也算绿」。不跑 `ruff format`：全仓重排会让 diff 失去信息 |
 | B9 回复质量的交叉评审（换家族重评 + 一致率） | ✅ | `eval/judge_cross.py`：188 条自动放行回复，评审 A=deepseek-v4.1-flash-1017（同族）、B=qwen3.8-max（异族），评分标准（提示词 + `Verdict`）逐字相同。`major` 5.9% 对 11.7%——同族确实偏乐观约 2 倍；`answers` 98.9% 两边一致。level 一致率 0.840、kappa 0.545（中等：14% 样本等级不同，逐条结论不可引用）；answers kappa 1.000（但几乎全 true，信息量低）。顺带修掉摘句字段的系统性失效（修提示词前 21/23 与 41/41 只写级别词，修后 0/24、0/52）。**不证明回复正确**：一致可能一起错，rubric 本身没换 |
 | B10 延迟分解（时间花在哪个节点） | ✅ | `eval/latency_profile.py`：可答样本等距抽 40 条、串行跑、BM25。分诊 p50 2.98 s / p95 4.45 s；检索 p50 1 ms / p95 2 ms；起草 p50 3.01 s / p95 6.14 s；整单 p50 6.01 s / p95 8.95 s、最大 10.42 s；模型合计 p50 6.01 s、本地计算 p50 1 ms。还给了 `--from-items`：拿上次的明细换口径重算，不必再调模型。| **单机、当天、串行**的一次采样，不是容量结论；网关不在这 40 条路径上（一次工具都没调），它的成本另见 `bench_gateway.py` |
 | B11 起草首字延迟（流式值不值） | ◐ | `eval/ttft_probe.py`：自由文本流式首字 p50 1.27 s / p95 3.64 s，整段 p50 1.67 s / p95 4.05 s（n=6）；同一条 prompt 由 `nodes.draft_messages` 拼，与线上一致 | **没有改契约**：结构化输出无法增量（`.stream()` 单 chunk），改自由文本后引用可解析率 0/6；样本只有 6 条，且限了 max_tokens |
@@ -52,7 +52,7 @@
 |---|---|---|---|
 | D1 节点级 trace，JSON，UI 按节点展开 | ✅ | 每次 run 一份 JSON（跨审核阶段续写同一份）；单文件 HTML 查看器，XSS 载荷放进每个字段后独立验证：数据块无裸 `<`、逻辑脚本无载荷、`node --check` 通过 | 无头浏览器只验到「脚本执行 + 详情渲染」，点击切换 run 没有自动化 |
 | D2 成本 = 实测 token × 单价，注明来源与日期 | ◐ | token 取自网关返回的 usage；单价**只读你填的配置**，缺来源/日期会报错；没配单价只报 token，**不显示 0**；合计成本在任一单缺单价时为 None | **我没有拿到真实单价**（网关价格接口返回模糊值），所以报告里目前只有 token，没有金额。你填 `pricing.json` 后才有金额 |
-| D3 评测集一键回归 | ◐ | `python eval/eval_all.py --quick/--full`（本机没有 `make`，Makefile 只是转发）。`--quick` 在真实数据上跑通：60 条分层子集，Recall@5 0.897、答对率 0.872（n=39）、拒答准确率 1.000（n=21）、误拒率 0.051、笼统消息追问率 1.000（n=10）；**耗时 5 分 37 秒**（主要是流水线）。这次发现并修了一个集成缺口：工具选择步骤默认找的文件名和生成器写的对不上 | `--full` 没跑过；子集只有 39 条可答，数字波动比全量大；`--quick` 的样本是固定 seed 的，不是随机 |
+| D3 评测集一键回归 | ◐ | `python eval/eval_all.py --quick/--full`（本机没有 `make`，Makefile 只是转发）。`--quick` 在真实数据上跑通：60 条分层子集，Recall@5 0.897、答对率 0.872（n=39）、拒答准确率 1.000（n=21）、误拒率 0.051、笼统消息追问率 1.000（n=10）；同配置 2026-11-17 再跑一次：答对率 0.846、误拒率 0.077、Recall@5 0.897、chunk_hit@4 0.821；**耗时 5 分 37 秒**（主要是流水线）。这次发现并修了一个集成缺口：工具选择步骤默认找的文件名和生成器写的对不上 | `--full` 没跑过；子集只有 39 条可答，数字波动比全量大；`--quick` 的样本是固定 seed 的，不是随机 |
 | D4 badcase 回流 | ◐ | 导出脚本 + 期望去向纯函数，不自动并入评估集 | 骨架，清单本来就只要求骨架 |
 | D5 长期记忆接口 | ✅ | 只有 Store 接口、读写约定和 `NullMemoryStore`，不实现——清单要求如此 | |
 | D6 浏览器里跑通全链路 | ✅ | `GET /` 一个自包含 HTML 工单台（无框架、无构建链，CSP 收紧、页面不内嵌业务数据）：客户开单 → SSE 节点进度逐个亮 → 坐席看到草稿/引用/审计 → 通过并发送 → 二次确认 → 已解决。真浏览器里用 c1/a1 两个身份走完 T-000001（含审计里 `needs_approval → approved → confirmed → executed` 一串）；升级卡（T-000002）显示「建议升级 + 升级原因」、按钮变「确认升级」；引用卡片点开能看到知识库原文（T-000003）；**运行轨迹 tab**：每节点一条横向耗时条 + 输出摘要，顶部「算力 61.41 s / 全程 762.69 s（含等人工审核）」两个数分开给（第一版只给一个数，把等审核的 11 分钟算成了耗时，被实测抓出来），token `1862（972 进 / 890 出）`；**审计 tab** 改表格 + 决策徽章。轨迹走 `GET /tickets/{id}/trace` 只读磁盘上的 trace，不重跑图；**轮次下拉**（`GET /tickets/{id}/traces`）默认最近一轮、可往回翻，T-000001 实测 13 轮（`?run_id=` 指定某一轮；别的工单的 run_id 会 404，串不了门） | 身份切换就是换请求头，没有登录；SSE 断线不重连；审计只显示最后 40 条。界面是演示台，不是产品前端 |
@@ -82,3 +82,23 @@
 - ~~没有在真实浏览器里验证 trace 查看器~~ **已验**：`scripts/check_viewer.py` 用无头 Edge 渲染 12 个 run 并检查执行后的 DOM（缺标记退出 1、找不到浏览器退出 2 不算通过）；点击切换 run 在 Chromium 里手工点过一次，没有自动化。
 - **Docker 镜像已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器，2026-11-15）：`docker build` 退出码 0，镜像 714 MB；容器内 `uid=999(app)`，`/app/data` 属主 `app:app` 且可写；启动后 `/health` 返回 `{"ok":true}`，无 `X-User-Id` 请求 `/tickets` 返回 401；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 与 `traces/`；`docker compose config` 解析通过。之前推理出的风险（非 root 下 `/app/data` 不可写）**成立，且已被 Dockerfile 里那条 chown 修掉**——删掉该行会 `PermissionError`。构建侧环境问题：国内直连 Docker Hub 超时，`# syntax=docker/dockerfile:1` 的 frontend 解析发生在 **buildx 客户端**，只配 daemon 代理不够，必须给 `docker build` 命令本身设 `HTTP(S)_PROXY`。
 - ~~没有并发/压力测试~~ **网关层已量过**（`eval/bench_gateway.py`，假工具、单机、8 进程）：16 个不同 run 的墙钟从 1.88 s 降到 0.25 s。没有做端到端压测——真实链路的一秒级延迟来自模型，不来自网关。
+
+## 收尾审查（2026-11-17，Codex）
+
+另一个 agent 做对抗式审查，15 个文件、+14 条测试（699 → 713）。八处行为缺陷，全部有回归测试：
+
+| # | 问题 | 修法 | 证据 |
+|---|---|---|---|
+| 1 | 已驳回的动作，同幂等键再提一次会静默重新变成待审批 | 网关在 `needs_approval` 分支先判 `status == "rejected"` → `Rejected(Gate.RISK, "approval_rejected")` + 审计 | `test_replaying_a_rejected_approval_returns_rejected` |
+| 2 | 没有店铺范围的客户能给任意店铺建单 | `create_ticket` 去掉 `customer.shop_ids and` 短路 | `test_customer_without_shop_scope_cannot_create_ticket_for_a_shop` |
+| 3 | 升级是三次独立写，中途失败留半截、重试写两遍 | `_record_escalation` 一个事务写完两条消息，幂等键 `{idem_key}:reason` / `:actions` | `test_partial_escalation_is_not_adopted_and_can_be_retried` |
+| 4 | `post_followup` 会真的发给客户，却按内部写（不需要批准） | 风险等级改 `EXTERNAL_SEND`；系统追问走自批 + 确认，MCP 侧停在 `needs_approval` | `test_post_followup_requires_approval_over_mcp` |
+| 5 | 平台对接类问题在客户没提店名时不查店铺授权 | 该类一定查；店名取工单关联店铺（可信上下文） | `test_shop_auth_defaults_to_the_ticket_shop_when_customer_omits_a_shop_name` |
+| 6 | 规划器的 `shop_name` 被静默丢掉 | 取值元组补 `shop_name` | 无单独用例：`test_shop_auth_defaults_to_the_ticket_shop_when_customer_omits_a_shop_name` 那条路径依赖它 |
+| 7 | 一条工具降级、另一条成功时仍交给模型起草 | 任一 `unavailable` → 确定性降级文案 | `test_mixed_order_success_and_logistics_outage_use_deterministic_reply` |
+| 8 | 升级原因里声称「同时通知 oncall」，实际只发了一个团队 | 删掉该分支与文案 | `test_critical_escalation_does_not_claim_to_notify_secondary_teams` + `test_8_critical_routes_to_the_primary_team_only` |
+
+另：`reply_edited` 进 `build_view`、人工改过的回复清空引用并标 `edited_by_human`；纯空白消息 422；`scripts/check.py` 未执行任何一步时退出码 2。
+
+验证：`scripts/check.py` → ruff 全绿 + 713 passed, 1 skipped；独立数据目录 + 真实模型的 44 条冒烟全过；`eval_all.py --quick` → 答对率 0.846（n=39）、拒答 1.000（n=21）、误拒 0.077、工具选择 1.000、泄露 0。
+
