@@ -22,6 +22,7 @@ from carepilot.config import ROOT, get_settings
 from carepilot.evaluation.metrics import percentile
 from carepilot.evaluation.report import markdown_table, save_report
 from carepilot.evaluation.runners import run_pipeline
+from carepilot.evaluation.sampling import even_sample
 from carepilot.evaluation.schema import EvalItem, load_dataset
 
 DEFAULT_REPORT_DIR = ROOT / "eval" / "real" / "reports"
@@ -41,12 +42,8 @@ LLM_NODES = ("classify_ms", "draft_ms", "ask_for_info_ms")
 
 
 def pick(items: list[EvalItem], limit: int) -> list[EvalItem]:
-    """只在可答样本里等距抽 limit 条。等距而不是随机会让报告可复现。"""
-    pool = [it for it in items if it.answerable]
-    if limit <= 0 or limit >= len(pool):
-        return pool
-    step = len(pool) / limit
-    return [pool[int(i * step)] for i in range(limit)]
+    """只在可答样本里抽 limit 条。抽样本身在 `evaluation.sampling`，这里只是加可答过滤。"""
+    return even_sample([it for it in items if it.answerable], limit)
 
 
 def _bucket(label: str, values: list[float]) -> dict[str, Any]:

@@ -290,6 +290,21 @@ curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=30
 - **口径**：串行跑（`--concurrency 1`）。并发会让请求在模型侧排队，测出来的就不是「一次要多久」而是「排队多久」。只在这台机器、当天、这个网关上量过；换个模型或网关繁忙时段，绝对值会变，比例不会。
 - 明细留在 `eval/real/reports/latency/*.items.jsonl`，`--from-items` 可以拿它换统计口径重算，不用再调一次模型。
 
+### 流式：量过了，先不改
+
+起草这一步 p50 3.01 s 里客户什么都看不到，直觉是流式输出。`uv run python eval/ttft_probe.py --limit 6` 量了同一条 prompt（和线上共用 `nodes.draft_messages`，不是另抄一份）：
+
+| 量的是哪一段 | 样本 | p50 | p95 | 最大 |
+|---|---|---|---|---|
+| 首字（第一个非空 chunk） | 6 | 1.27 s | 3.64 s | 4.13 s |
+| 整段（流结束） | 6 | 1.67 s | 4.05 s | 4.60 s |
+
+结论是**先不改**：
+
+- **结构化输出给不了增量。**`with_structured_output(DraftResult).stream()` 只吐一个 chunk，要等整个 JSON 解析完才给对象（实测单次 6 秒后一次性到）。所以流式的前提是把起草改成自由文本、再用代码解析 `[n]` 做引用校验。而自由文本实测 **0/6** 条带 `[n]`（另有 2/6 把 `cited_ids: ["1","2"]` 当正文末尾写出来），引用校验会全灭——这是拿 0.803 的可答率基线去换 1.7 秒白屏：首字最早也只能在分诊 2.98 s + 起草首字 1.27 s ≈ 4.3 s 出现，分诊那一段省不掉。
+- **自由文本确实更快**（整段 p50 1.67 s 对结构化 3.01 s），但这里限了 `--max-tokens 512`、结构化那条没限，差距里有长度差，不能全算成格式开销。真要省时间，先验「模型肯不肯在正文里写 `[n]`」比先改契约划算。
+- 6 条单次采样，不是 SLA。脚本退出码与延迟账一致：没有样本退出 2，正常 0。
+
 ## 局限（面试前要先讲清楚）
 
 - **评估集是 LLM 用文档反向合成的**，问题用词天然偏近原文，BM25 的数字偏乐观。我抽查过一部分，没有逐条人工审核。真实工单上的表现需要真实数据验证。
@@ -302,7 +317,7 @@ curl -X POST -H "X-User-Id: admin1" "localhost:8000/admin/reconcile?min_age_s=30
 - **单次模型调用耗时随网关负载变化很大**：40 条串行实测整单 p50 6.01 s / p95 8.95 s，同一天另一次真实走查里单次调用 p50 7.7 s、最大 20 s。文档里的耗时数字对"网关繁忙"没有代表性，别当 SLA。
 - ~~Docker 镜像没有构建过~~ **已构建并运行验证**（Docker Desktop 29.9.3，Linux 容器）：`docker build` 退出码 0，镜像 714 MB；容器以 `app` 用户启动、健康检查 `healthy`、`/health` 返回 `{"ok":true}`；`/app/data` 下由 app 用户创建 `tickets.sqlite` / `gateway.sqlite` / `checkpoints.sqlite` 和 `traces/`（那条按推理加的 chown **成立且必需**，删掉会 `PermissionError`）；无 `X-User-Id` 请求 `/tickets` 返回 401；`docker compose config` 解析通过。
 - 构建侧的环境坑（不是项目问题）：国内直连 Docker Hub 超时，且 `# syntax=docker/dockerfile:1` 的 frontend 解析发生在 **buildx 客户端进程**里，不吃 daemon 的代理配置——必须给 `docker build` 命令本身设 `HTTP(S)_PROXY`。
-- **并发只在网关这一层量过**：`eval/bench_gateway.py` 用的是假工具、单机、8 个进程，没有做端到端压测。延迟的分解已经量过（见上面「延迟」一节：模型 p50 6.01 s、本地 p50 1 ms），但那是串行单机的一次采样，不是容量结论。trace 查看器只做了静态检查和 XSS 载荷测试，没在真实浏览器里点过。
+- **并发只在网关这一层量过**：`eval/bench_gateway.py` 用的是假工具、单机、8 个进程，没有做端到端压测。延迟的分解已经量过（见上面「延迟」一节：模型 p50 6.01 s、本地 p50 1 ms），但那是串行单机的一次采样，不是容量结论。**trace 查看器已在无头浏览器里验过**（`uv run python scripts/check_viewer.py`：渲染 12 个 run，检查执行后的 DOM 里有没有详情面板；缺标记退出 1，找不到浏览器退出 2、不算通过）。点击切换 run 是在 Chromium 里手工点过一次，没有自动化。
 - **MCP 通道没有认证**，身份由 `--user` 启动参数指定，连上来的客户端可以声称是任何人。只读工具在 MCP 上会直接执行；写操作拿不到批准，因为这条通道上没有人能批准。
 - **MCP 只做了 server 方向**：本项目把工具暴露给别的 agent，反过来「用别人的 MCP 工具」还没接进规划节点（规划器的工具集是固定的五个只读工具）。
 - 向量索引离线构建约 20 分钟（2.2 万个 chunk，CPU），本项目没有做增量更新。
@@ -324,10 +339,10 @@ src/carepilot/
   evaluation/     指标、运行器、评估集生成、工具选择/注入评测
   api/            FastAPI：app.py（演示模式）、governed.py（治理模式）
   auth.py         角色与调用者身份（请求头模拟）
-eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账、latency_profile.py=延迟账
-scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py
+eval/             评估与实验脚本（真实评估集和报告在 eval/real，不入库）；measure_context.py=上下文账、run_multiturn.py=多轮对照、judge_cross.py=交叉评审、bench_gateway.py=并发账、latency_profile.py=延迟账、ttft_probe.py=首字延迟
+scripts/          check.py（门禁：ruff + pytest）、build_kb.py、build_index.py、cost_report.py、trace_viewer.py、check_viewer.py（无头浏览器验查看器）
 docs/             架构、功能清单验收状态（status.md）、需求追踪、面试材料、记忆约定
-tests/            681 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口）
+tests/            689 个测试，均不依赖网络和真实数据（含真实子进程强杀、MCP stdio 端到端、黑盒对抗、同键并发、XSS 载荷、对账入口、查看器无头验证）
 ```
 
 ## 配置

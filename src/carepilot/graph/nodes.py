@@ -224,6 +224,32 @@ def build_actions_summary(state: Mapping[str, Any]) -> str:
     return "；".join(parts)[:900]
 
 
+def draft_messages(
+    hits: Sequence[Mapping[str, Any]],
+    customer_message: str,
+    *,
+    shop_status: str | None = None,
+    edition: str | None = None,
+    history_text: str = "",
+) -> list[BaseMessage]:
+    """拼起草节点要发的两条消息。
+
+    单独抽出来是为了能被测量脚本复用：量首字延迟时必须发**同一条** prompt，
+    另抄一份就测不出「线上到底是几秒」。
+    """
+
+    def label(h: Mapping[str, Any]) -> str:
+        return "（系统查询结果）" if h.get("kind") == "tool" else (f"（{h['top_dir']}）" if h.get("top_dir") else "")
+
+    context = "\n\n".join(f"[{i}]{label(h)} {h['text']}" for i, h in enumerate(hits, 1))
+    extra = f"\n\n【店铺授权状态】{shop_status}" if shop_status else ""
+    extra += f"\n\n【客户使用的产品线】{edition}" if edition else ""
+    history_block = f"\n\n【对话历史】\n{history_text}" if history_text else ""
+    system = DRAFT_PROMPT + (DRAFT_HISTORY_RULE if history_text else "")
+    human = f"【资料】\n{context}{extra}{history_block}\n\n【客户消息】\n{customer_message}"
+    return [SystemMessage(system), HumanMessage(human)]
+
+
 def make_nodes(
     settings: Settings,
     retriever: Retriever,
@@ -353,24 +379,17 @@ def make_nodes(
     def draft_reply(state: TicketState) -> dict:
         if not state["hits"]:
             return {"resolution": "escalate", "escalate_reason": "知识库无相关资料"}
-        # 给模型看 [1]~[N] 的短编号，不给 chunk 的长路径 id：真实 id 形如「企业版/采购入库单#1」，
-        # 实测模型会缩写成「资料#1」「#0」「10」甚至留空，导致 203 条可答样本里 78 条（38%）被引用校验误杀
-        def label(h: dict) -> str:
-            return "（系统查询结果）" if h.get("kind") == "tool" else (f"（{h['top_dir']}）" if h.get("top_dir") else "")
-
-        context = "\n\n".join(f"[{i}]{label(h)} {h['text']}" for i, h in enumerate(state["hits"], 1))
-        extra = f"\n\n【店铺授权状态】{state['shop_status']}" if state.get("shop_status") else ""
-        edition = normalize_edition((state.get("triage") or {}).get("product_edition"))
-        extra += f"\n\n【客户使用的产品线】{edition}" if edition else ""
         # 多轮里客户说「这个」「还是不行」指的是上一轮那件事，回复节点原来完全看不到历史，只能拿本句硬答
         view = compress_history(state.get("history") or [], budget_tokens=settings.context_budget_tokens)
         log_history_view(view, node="draft_reply")
-        history_block = f"\n\n【对话历史】\n{view.text}" if view.text else ""
         result: DraftResult = models.draft.invoke(
-            [
-                SystemMessage(DRAFT_PROMPT + (DRAFT_HISTORY_RULE if view.text else "")),
-                HumanMessage(f"【资料】\n{context}{extra}{history_block}\n\n【客户消息】\n{state['customer_message']}"),
-            ]
+            draft_messages(
+                state["hits"],
+                state["customer_message"],
+                shop_status=state.get("shop_status"),
+                edition=normalize_edition((state.get("triage") or {}).get("product_edition")),
+                history_text=view.text,
+            )
         )
         # 引用必须能还原成检索结果里真实存在的 chunk，还原不了的（模型编造的）一律丢弃
         cited = resolve_citations(result.cited_ids, [h["id"] for h in state["hits"]])

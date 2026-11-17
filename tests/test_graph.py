@@ -7,6 +7,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from carepilot.config import ROOT
+from carepilot.graph.nodes import draft_messages, hit_row
 from fakes import RecordingTicketSystem, make_draft, make_hit, make_triage
 
 CFG = {"configurable": {"thread_id": "t1"}}
@@ -298,3 +299,14 @@ def test_11_resume_after_resolved_is_silent_noop(make_env):
     assert after.next == ()
     assert env.system.replies == replies_before
     assert env.system.escalations == []
+
+def test_draft_prompt_comes_from_the_shared_builder(make_env):
+    # 测量脚本（eval/ttft_probe.py）复用 draft_messages 来量首字延迟，如果节点自己另拼一份，
+    # 那个数字就量的不是线上的 prompt。这条钉住「节点发的就是那个函数拼的」。
+    hits = [make_hit()]
+    env = make_env(make_triage(category="feature_howto"), make_draft(cited_ids=["doc#0"]), hits=hits)
+    env.graph.invoke(INITIAL, CFG)
+
+    sent = env.draft.calls[0]
+    expected = draft_messages([hit_row(h) for h in hits], INITIAL["customer_message"])
+    assert sent == expected
