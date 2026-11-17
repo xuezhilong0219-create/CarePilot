@@ -1,5 +1,7 @@
 """工具箱 + 网关 + 工单存储 + 沙箱的集成测试：全部用真实实现，不用 mock。"""
 
+import sqlite3
+
 import pytest
 
 from carepilot.auth import Principal, Role
@@ -156,6 +158,17 @@ def test_send_reply_requires_approval_then_confirmation_and_is_idempotent(env):
     assert isinstance(env.tb.gateway.confirm(out.approval_id, C1), Rejected)  # 客户不能确认
 
 
+def test_send_reply_rejects_whitespace_only_text(env):
+    t = env.ticket(C1)
+    env.store.claim(A1, t.ticket_id)
+
+    out = env.tb.gateway.call(__ctx(A1, "r-send-blank", t), "send_reply",
+                              {"ticket_id": t.ticket_id, "text": " \t "})
+
+    assert isinstance(out, Rejected) and out.gate is Gate.SCHEMA and out.code == "invalid_args"
+    assert env.store.list_messages(C1, t.ticket_id) == []
+
+
 def test_escalate_writes_reason_and_actions_for_the_next_agent(env):
     t = env.ticket(C1)
     env.store.claim(A1, t.ticket_id)
@@ -171,6 +184,38 @@ def test_escalate_writes_reason_and_actions_for_the_next_agent(env):
     assert any("已查询订单：未找到" in m.body for m in msgs)
     assert all(m.visibility == "internal" for m in msgs)
     assert env.store.list_messages(C1, t.ticket_id) == []  # 客户看不到任何内部内容
+
+
+def test_partial_escalation_is_not_adopted_and_can_be_retried(env):
+    t = env.ticket(C1)
+    env.store.claim(A1, t.ticket_id)
+    ctx = __ctx(A1, "r-escalate-recovery", t)
+    args = {"ticket_id": t.ticket_id, "team": "data_support_team", "reason": "需要查账单",
+            "actions_summary": "已查询订单：未找到"}
+    pending = env.tb.gateway.call(ctx, "escalate_ticket", args)
+    assert isinstance(pending, NeedsApproval)
+
+    with sqlite3.connect(env.store._db_path) as db:
+        db.execute("""CREATE TRIGGER fail_escalation_actions BEFORE INSERT ON ticket_messages
+            WHEN NEW.idem_key LIKE '%:actions'
+            BEGIN SELECT RAISE(ABORT, 'synthetic action-note failure'); END""")
+
+    failed = env.tb.gateway.approve(pending.approval_id, A1)
+
+    assert isinstance(failed, Rejected) and failed.code == "tool_error"
+    assert env.store.get_ticket(A1, t.ticket_id).status == "new"
+    assert env.store.list_messages(A1, t.ticket_id) == []
+
+    with sqlite3.connect(env.store._db_path) as db:
+        db.execute("DROP TRIGGER fail_escalation_actions")
+
+    recovered = env.tb.gateway.approve(pending.approval_id, A1)
+
+    assert isinstance(recovered, Executed)
+    assert env.store.get_ticket(A1, t.ticket_id).status == "escalated"
+    assert [m.body for m in env.store.list_messages(A1, t.ticket_id)] == [
+        "升级原因：需要查账单（转交 data_support_team）", "已完成动作：已查询订单：未找到",
+    ]
 
 
 def test_unknown_team_is_rejected_by_the_rule_gate(env):

@@ -22,7 +22,7 @@ from carepilot.sandbox.data import build_world
 from carepilot.sandbox.logistics import LogisticsClient
 from carepilot.store import TicketStore, seed_demo_users
 from carepilot.tools import TicketSystem
-from carepilot.toolbox import Toolbox, principal_to_dict
+from carepilot.toolbox import LOGISTICS_DEGRADED_REPLY, Toolbox, principal_to_dict
 
 from fakes import FakeRetriever, ScriptedInvoker, make_draft, make_hit, make_triage
 
@@ -131,6 +131,20 @@ def test_identifier_the_model_made_up_is_never_executed(make_env):
     assert env.tb.gateway.audit(ticket_id=ticket.ticket_id, limit=50) and all(e["tool"] != "query_order" for e in env.tb.gateway.audit(ticket_id=ticket.ticket_id))
 
 
+def test_shop_auth_defaults_to_the_ticket_shop_when_customer_omits_a_shop_name(make_env):
+    world = build_world(7)
+    other_shop = world.shops["S2"]
+    env = make_env(
+        make_triage(category="platform_integration", platform_name="淘宝", shop_name=other_shop.name),
+        make_draft(cited_ids=["1"]), hits=[make_hit()],
+    )
+    _, cfg = env.start("淘宝店铺授权过期了怎么办")
+
+    values = env.snap(cfg).values
+
+    assert values["shop_status"]["shop_id"] == "S1"
+
+
 def test_no_applicable_tool_escalates_and_reviewer_executes_through_the_gateway(make_env):
     env = make_env(DATA_EXC(), None, ToolPlan(tool="none"))
     ticket, cfg = env.start("抖店9月结算账单金额怎么少了86块？")
@@ -146,6 +160,21 @@ def test_no_applicable_tool_escalates_and_reviewer_executes_through_the_gateway(
     assert [e["decision"] for e in env.tb.gateway.audit(ticket_id=ticket.ticket_id) if e["tool"] == "escalate_ticket"][-1] == "executed"
 
 
+def test_critical_escalation_does_not_claim_to_notify_secondary_teams(make_env):
+    env = make_env(make_triage(category="data_exception", severity="critical", fault_description="查账单"), None,
+                   ToolPlan(tool="none"))
+    ticket, cfg = env.start("查账单为什么少了")
+    assert env.pending(cfg)[0]["route_to"] == ["data_support_team"]
+
+    env.review(cfg, action="approve", reviewer=principal_to_dict(ADMIN))
+
+    messages = env.store.list_messages(A1, ticket.ticket_id)
+    reason = next(m.body for m in messages if m.kind == "system")
+    assert "同时通知" not in reason
+    assert "参考团队" not in reason
+    assert "oncall" not in reason
+
+
 def test_logistics_outage_degrades_to_a_fixed_reply_without_calling_the_draft_model(make_env):
     world = build_world(7)
     shipped = order_of(world, "S1", shipped=True)
@@ -158,6 +187,29 @@ def test_logistics_outage_degrades_to_a_fixed_reply_without_calling_the_draft_mo
     p = env.pending(cfg)[0]
     assert p["resolution"] == "auto_reply" and "暂时" in p["draft"] and env.draft.call_count == 0
     assert p["tool_run"]["outcome"] == "unavailable"
+
+
+def test_mixed_order_success_and_logistics_outage_use_deterministic_reply(make_env):
+    world = build_world(7)
+    order = order_of(world, "S1", shipped=True)
+
+    def down(_order_id):
+        raise TimeoutError("carrier down")
+
+    env = make_env(
+        DATA_EXC(), make_draft(reply="模型回复", cited_ids=["1"]),
+        [ToolPlan(tool="query_order", order_id=order.order_id),
+         ToolPlan(tool="query_shipment", order_id=order.order_id), ToolPlan(tool="none")],
+        transport=down,
+    )
+    _, cfg = env.start(f"查订单 {order.order_id} 状态和物流")
+
+    values = env.snap(cfg).values
+
+    assert env.draft.call_count == 0
+    assert values["tool_run"]["outcome"] == "unavailable"
+    assert order.order_id in values["draft"]
+    assert LOGISTICS_DEGRADED_REPLY in values["draft"]
 
 
 def test_approve_is_two_step_nothing_reaches_the_customer_until_confirmed(make_env):
@@ -185,6 +237,8 @@ def test_confirm_flag_sends_once_and_resolves_the_ticket_and_edit_uses_reviewer_
     v = env.review(cfg, action="edit", reply="审核人改写后的回复", reviewer=principal_to_dict(A1), confirm=True)
     assert v["status"] == "resolved" and [a["tool"] for a in v["actions"]] == ["send_reply", "set_ticket_status"]
     assert [m.body for m in env.store.list_messages(C1, ticket.ticket_id)] == ["审核人改写后的回复"]
+    assert env.snap(cfg).values["citations"] == [] and env.snap(cfg).values["citation_details"] == []
+    assert env.snap(cfg).values["reply_edited"] is True
     assert env.store.get_ticket(A1, ticket.ticket_id).status == "resolved"
 
 

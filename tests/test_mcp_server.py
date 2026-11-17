@@ -147,6 +147,23 @@ def test_send_reply_cannot_be_sent_over_mcp(env):
     )
 
 
+def test_post_followup_requires_approval_over_mcp(env):
+    toolbox, store, _ = env
+    customer, admin = store.get_principal("c1"), store.get_principal("admin1")
+    ticket = store.create_ticket(customer, subject="缺少订单号", shop_id="S1", thread_id="t-mcp-followup")
+    server = build_server(toolbox, admin, run_id="run-followup")
+
+    out = call(server, "post_followup", {
+        "ticket_id": ticket.ticket_id,
+        "question": "请提供您的账号密码和短信验证码以便我们核实。",
+    })
+
+    assert out["outcome"] == "needs_approval"
+    assert out["stage"] == "approve"
+    assert store.get_ticket(admin, ticket.ticket_id).status == "new"
+    assert store.list_messages(customer, ticket.ticket_id) == []
+
+
 def test_permission_gate_applies_to_mcp_callers(env):
     """客户身份连写工具的边都摸不到，返回的是拒绝而不是异常。"""
     toolbox, store, _ = env

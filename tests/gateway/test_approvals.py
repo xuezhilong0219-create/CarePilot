@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from carepilot.gateway.spec import Executed, Gate, NeedsApproval, ToolContext
+from carepilot.gateway.spec import Executed, Gate, NeedsApproval, Rejected, ToolContext
 from conftest import AGENT, ADMIN, CUSTOMER
 
 
@@ -50,6 +50,20 @@ def test_closed_approvals_cannot_be_approved(setup_gateway, status):
         with sqlite3.connect(path) as db:
             db.execute("UPDATE approvals SET status='expired' WHERE approval_id=?", (pending.approval_id,))
     assert gateway.approve(pending.approval_id, AGENT).code == "approval_not_pending"
+    assert calls == []
+
+
+def test_replaying_a_rejected_approval_returns_rejected(setup_gateway):
+    gateway, calls, _, _ = setup_gateway
+    ctx = ToolContext(AGENT, "run")
+    args = {"shop_id": "mine"}
+    pending = gateway.call(ctx, "state", args)
+    gateway.reject(pending.approval_id, AGENT, "not allowed")
+
+    replay = gateway.call(ctx, "state", args)
+
+    assert isinstance(replay, Rejected)
+    assert replay.code == "approval_rejected"
     assert calls == []
 
 

@@ -14,7 +14,7 @@ from urllib.parse import quote
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from langgraph.types import Command
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, Role
 from ..gateway.guard import BudgetExceeded, RunBudget, RunGuard
@@ -47,13 +47,23 @@ def _trace_summary(t: Any) -> dict[str, Any]:
 PRIORITY_BY_SEVERITY = {"low": "low", "medium": "medium", "high": "high", "critical": "critical"}
 
 
-class TicketCreate(BaseModel):
+class _MessageBody(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def reject_whitespace_only(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message must not be blank")
+        return value
+
+
+class TicketCreate(_MessageBody):
     shop_id: str | None = Field(default=None, pattern=r"^S\d{1,4}$")
 
 
-class MessageIn(BaseModel):
-    message: str = Field(min_length=1, max_length=2000)
+class MessageIn(_MessageBody):
+    pass
 
 
 class ReviewBody(BaseModel):
@@ -61,6 +71,13 @@ class ReviewBody(BaseModel):
     reply: str | None = Field(default=None, max_length=4000)  # action=edit 时，审核人改写后的回复
     note: str | None = Field(default=None, max_length=500)
     confirm: bool = False  # True：批准后直接确认发送；默认两步，确认前客户收不到任何东西
+
+    @field_validator("reply")
+    @classmethod
+    def reject_whitespace_only_reply(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("reply must not be blank")
+        return value
 
 
 def register_governed(app: FastAPI) -> None:
@@ -149,6 +166,7 @@ def register_governed(app: FastAPI) -> None:
                 card["citation_details"] = [{**c, "link": f"/citations/{quote(c['id'], safe='/:')}"} for c in card["citation_details"]]
             out["pending_review"] = card
             out["pending_confirmation"] = values.get("pending_confirmation") if workflow == "awaiting_confirmation" else None
+            out["reply_edited"] = bool(values.get("reply_edited"))
             out["actions"] = values.get("actions")
             out["triage"] = values.get("triage")
             out["abort_reason"] = values.get("escalate_reason") if workflow == "needs_human" else None

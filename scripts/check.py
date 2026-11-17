@@ -29,10 +29,12 @@ def main(argv: list[str] | None = None) -> int:
         skip = {s.strip() for s in argv[argv.index("--skip") + 1].split(",") if s.strip()}
 
     failed: list[str] = []
+    ran: list[str] = []
     for name, cmd in STEPS:
         if name in skip:
             print(f"[{name}] 跳过")
             continue
+        ran.append(name)
         started = time.monotonic()
         print(f"[{name}] {' '.join(cmd)}", flush=True)
         code = subprocess.call(cmd, cwd=ROOT)
@@ -44,7 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     if failed:
         print(f"门禁失败：{', '.join(failed)}")
         return 1
-    print("门禁通过：lint + tests")
+    if not ran:
+        print("门禁未运行：没有执行任何检查")
+        return 2
+    print(f"门禁通过：{' + '.join(ran)}")
     return 0
 
 

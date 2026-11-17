@@ -150,6 +150,9 @@ class ToolGateway:
                     # 过期的提议在同一个 run 里重新提出时重新打开，否则同样的动作会被永久卡死
                     db.execute("UPDATE approvals SET status='pending', approver_id=NULL, updated_at=? WHERE idem_key=?", (now, key))
                     row = db.execute("SELECT * FROM approvals WHERE idem_key=?", (key,)).fetchone()
+                if row["status"] == "rejected":
+                    self._event(db, ctx, tool, summary, "rejected", code="approval_rejected")
+                    return Rejected(Gate.RISK, "approval_rejected", "approval_rejected")
                 self._event(db, ctx, tool, summary, "needs_approval", code="approval_required")
             stage = "confirm" if row["risk"] == Risk.EXTERNAL_SEND and row["status"] in ("approved", "confirmed") else "approve"
             return NeedsApproval(row["approval_id"], tool, {"args_summary": summary}, stage)

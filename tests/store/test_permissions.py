@@ -1,6 +1,6 @@
 import pytest
 
-from carepilot.auth import Principal
+from carepilot.auth import Principal, Role
 from carepilot.store import Conflict, Forbidden, NotFound, TicketStore, can_modify, can_view
 
 from conftest import make_open_ticket, make_ticket
@@ -10,6 +10,13 @@ def test_customer_cannot_read_other_customers_ticket(store: TicketStore, c1: Pri
     ticket = make_ticket(store, c2, shop_id="S3")
     with pytest.raises(Forbidden):
         store.get_ticket(c1, ticket.ticket_id)
+
+
+def test_customer_without_shop_scope_cannot_create_ticket_for_a_shop(store: TicketStore):
+    customer = Principal("unassigned-customer", Role.CUSTOMER)
+
+    with pytest.raises(Forbidden):
+        store.create_ticket(customer, subject="synthetic", shop_id="S999", thread_id="thread-unscoped")
 
 
 def test_missing_ticket_is_not_found_not_forbidden(store: TicketStore, c1: Principal):

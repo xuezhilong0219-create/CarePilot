@@ -206,7 +206,7 @@ class TicketStore:
     ) -> Ticket:
         if customer.role != Role.CUSTOMER:
             raise Forbidden("只有客户能创建工单")
-        if customer.shop_ids and shop_id is not None and shop_id not in customer.shop_ids:
+        if shop_id is not None and shop_id not in customer.shop_ids:
             raise Forbidden(f"客户无权操作店铺 {shop_id}")
         due_seconds = self.policy.seconds_for(priority)
         now = self._now()
@@ -336,6 +336,72 @@ class TicketStore:
             sql += " ORDER BY id"
             rows = conn.execute(sql, params).fetchall()
         return [_message(row) for row in rows]
+
+    def _record_escalation(
+        self, who: Principal, ticket_id: str, *, team: str, reason: str, actions_summary: str, idem_key: str,
+    ) -> Ticket:
+        reason_body = f"升级原因：{reason}（转交 {team}）"
+        actions_body = f"已完成动作：{actions_summary or '无'}"
+        messages = (
+            ("system", reason_body, f"{idem_key}:reason"),
+            ("note", actions_body, f"{idem_key}:actions"),
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            ticket = self._fetch_ticket(conn, ticket_id)
+            if not can_modify(who, ticket):
+                raise Forbidden(f"无权修改工单 {ticket_id}")
+            if ticket.status not in ("new", "open", "escalated"):
+                raise IllegalTransition(f"{ticket.status} -> escalated")
+
+            existing: dict[str, sqlite3.Row | None] = {}
+            for kind, body, key in messages:
+                row = conn.execute("SELECT * FROM ticket_messages WHERE idem_key=?", (key,)).fetchone()
+                if row is not None and (
+                    row["ticket_id"] != ticket_id or row["author_id"] != who.user_id
+                    or row["kind"] != kind or row["visibility"] != "internal" or row["body"] != body
+                ):
+                    raise Conflict("升级幂等键已用于另一条消息")
+                existing[key] = row
+
+            if ticket.status == "escalated" and not any(existing.values()):
+                raise IllegalTransition("escalated -> escalated")
+
+            def transition(to_status: str, detail: str) -> None:
+                current = self._fetch_ticket(conn, ticket_id)
+                if not can_transition(current.status, to_status):
+                    raise IllegalTransition(f"{current.status} -> {to_status}")
+                now = self._now()
+                cur = conn.execute(
+                    "UPDATE tickets SET status=?, updated_at=?, version=version+1 WHERE ticket_id=? AND version=?",
+                    (to_status, now, ticket_id, current.version),
+                )
+                if cur.rowcount == 0:
+                    raise Conflict(f"工单 {ticket_id} 已被并发修改")
+                conn.execute(
+                    "INSERT INTO ticket_events(ticket_id, ts, actor_id, event, from_status, to_status, detail) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (ticket_id, now, who.user_id, "transition", current.status, to_status, detail),
+                )
+
+            if ticket.status == "new":
+                transition("open", "分诊后进入处理")
+            current = self._fetch_ticket(conn, ticket_id)
+            if current.status == "open":
+                transition("escalated", reason)
+
+            for kind, body, key in messages:
+                if existing[key] is not None:
+                    continue
+                now = self._now()
+                conn.execute(
+                    "INSERT INTO ticket_messages(ticket_id, author_id, author_role, kind, visibility, body, "
+                    "idem_key, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (ticket_id, who.user_id, who.role.value, kind, "internal", body, key, now),
+                )
+                conn.execute("UPDATE tickets SET updated_at=? WHERE ticket_id=?", (now, ticket_id))
+
+            return self._fetch_ticket(conn, ticket_id)
 
     def transition(self, who: Principal, ticket_id: str, to_status: str, *, reason: str = "") -> Ticket:
         with self._connect() as conn:

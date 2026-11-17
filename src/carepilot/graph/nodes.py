@@ -266,14 +266,15 @@ def make_nodes(
         return principal_from_dict(state["principal"]) if state.get("principal") else SYSTEM_PRINCIPAL
 
     def post_followup(state: TicketState, question: str) -> None:
-        """把追问发给客户：经网关，用只允许模板化文本的 post_followup 工具，写审计。没接工具箱时不做。"""
+        """固定模板追问由服务端确定性批准并确认；MCP 调用仍停在待人工批准。"""
         if toolbox is None:
             return
-        toolbox.gateway.call(
-            ToolContext(SYSTEM_PRINCIPAL, state.get("run_id", ""), state.get("ticket_id")),
-            "post_followup",
-            {"ticket_id": state.get("ticket_id", ""), "question": question},
+        out = toolbox.propose_and_approve(
+            SYSTEM_PRINCIPAL, SYSTEM_PRINCIPAL, state.get("run_id", ""), state.get("ticket_id", ""),
+            "post_followup", {"ticket_id": state.get("ticket_id", ""), "question": question},
         )
+        if isinstance(out, NeedsApproval) and out.stage == "confirm":
+            toolbox.gateway.confirm(out.approval_id, SYSTEM_PRINCIPAL)
 
     def classify(state: TicketState) -> dict:
         history = state.get("history") or []
@@ -313,13 +314,30 @@ def make_nodes(
         if use_filter:
             rows = filter_by_edition(rows, edition_dir, edition_index)
         out: dict = {"query": query, "hits": rows[: settings.retrieval_top_k]}
-        if t["category"] == "platform_integration" and t.get("platform_name") and t.get("shop_name"):
-            if toolbox is None:
+        if t["category"] == "platform_integration":
+            if toolbox is None and t.get("platform_name") and t.get("shop_name"):
                 out["shop_status"] = system.check_shop_auth(t["platform_name"], t["shop_name"])
-            else:
-                run = toolbox.run_plan(principal_of(state), state.get("run_id", ""), state.get("ticket_id"),
-                                       ToolPlan(tool="query_shop_auth", shop_name=t["shop_name"]), source_text=t["shop_name"])
-                if run.outcome == "ok":
+            elif toolbox is not None:
+                customer_text = "\n".join(
+                    [m.get("text", "") for m in (state.get("history") or []) if m.get("role") == "customer"]
+                    + [state.get("customer_message", "")]
+                )
+                shop_name = t.get("shop_name")
+                source_text = customer_text
+                if shop_name and shop_name in customer_text:
+                    plan = ToolPlan(tool="query_shop_auth", shop_name=shop_name)
+                else:
+                    ticket_id = state.get("ticket_id")
+                    ticket = toolbox.store.get_ticket(SYSTEM_PRINCIPAL, ticket_id) if ticket_id else None
+                    if ticket is None or ticket.shop_id is None:
+                        plan = None
+                    else:
+                        plan = ToolPlan(tool="query_shop_auth", shop_id=ticket.shop_id)
+                        # The linked shop is trusted ticket context, not a model-extracted identifier.
+                        source_text = f"{customer_text}\n{ticket.shop_id}"
+                run = (toolbox.run_plan(principal_of(state), state.get("run_id", ""), state.get("ticket_id"),
+                                        plan, source_text=source_text) if plan is not None else None)
+                if run is not None and run.outcome == "ok":
                     out["shop_status"] = run.data
         return out
 
@@ -345,7 +363,7 @@ def make_nodes(
             plan: ToolPlan = models.planner.invoke([SystemMessage(PLANNER_PROMPT), HumanMessage(base_user + note)])
             if plan.tool == "none":
                 break
-            args = {k: getattr(plan, k) for k in ("order_id", "shop_id", "ticket_id") if getattr(plan, k)}
+            args = {k: getattr(plan, k) for k in ("order_id", "shop_id", "shop_name", "ticket_id") if getattr(plan, k)}
             guard_step("tool", tool=plan.tool, args=args, tokens=take_tokens())
             key = plan.tool + json.dumps(args, sort_keys=True, ensure_ascii=False)
             if key in seen:  # 重复提议不再执行；是不是死循环由守卫判定
@@ -360,10 +378,14 @@ def make_nodes(
         if good:
             hits = [{"id": r.source_id, "title": "系统查询结果", "text": r.facts_text, "score": 1.0, "kind": "tool"} for r in good]
             has_ok = any(r.outcome == "ok" for r in good)
-            patch: dict = {"hits": hits, "tool_run": {"outcome": "ok" if has_ok else "unavailable", "tool": runs[0].tool, "detail": "", "calls": calls}}
-            if not has_ok:  # 全部降级：确定性文案，不经过模型
-                patch.update(draft=good[0].facts_text, citations=[good[0].source_id], resolution="auto_reply",
-                             citation_details=citation_details([good[0].source_id], hits))
+            has_unavailable = any(r.outcome == "unavailable" for r in good)
+            patch: dict = {"hits": hits, "tool_run": {"outcome": "unavailable" if has_unavailable else "ok",
+                                                         "tool": runs[0].tool, "detail": "", "calls": calls}}
+            if not has_ok or has_unavailable:  # 物流降级文案不经过模型，即使本轮还有成功查询
+                facts = list(dict.fromkeys(r.facts_text for r in good))
+                ids = list(dict.fromkeys(r.source_id for r in good))
+                patch.update(draft="\n\n".join(facts), citations=ids, resolution="auto_reply",
+                             citation_details=citation_details(ids, hits))
             return patch
         first = runs[0]
         summary = {"outcome": first.outcome, "tool": first.tool, "detail": first.detail, "calls": calls}
@@ -413,8 +435,6 @@ def make_nodes(
     def route_escalation(state: TicketState) -> dict:
         t = state["triage"]
         teams = [TEAM_BY_CATEGORY[t["category"]]]
-        if t["severity"] == "critical":
-            teams.append("oncall")
         # 从 draft_reply 来时 resolution/escalate_reason 已有；从 classify 直达（data_exception）时在这里补上
         return {
             "route_to": teams,
@@ -470,25 +490,35 @@ def make_nodes(
         tid, rid = state["ticket_id"], state.get("run_id", "")
         action = review.get("action", "reject")
         if state["resolution"] == "auto_reply" and action in ("approve", "edit"):
-            text = review.get("reply") if action == "edit" and review.get("reply") else state["draft"]
+            edited = action == "edit" and bool(review.get("reply"))
+            text = review["reply"] if edited else state["draft"]
+            edit_metadata: dict[str, Any] = {"reply_edited": edited}
+            if edited:
+                edit_metadata.update(citations=[], citation_details=[])
+
             out = toolbox.propose_and_approve(reviewer, reviewer, rid, tid, "send_reply", {"ticket_id": tid, "text": text})
             actions = [action_of("send_reply", out)]
+            if edited:
+                actions[0]["edited_by_human"] = True
             if isinstance(out, NeedsApproval) and out.stage == "confirm":
                 if not review.get("confirm"):  # 默认两步：批准后等人二次确认，确认前客户什么都收不到
                     return {"actions": actions, "status": "awaiting_confirmation",
-                            "pending_confirmation": {"approval_id": out.approval_id, "tool": "send_reply"}}
+                            "pending_confirmation": {"approval_id": out.approval_id, "tool": "send_reply",
+                                                      "reply_edited": edited}, **edit_metadata}
                 out = toolbox.gateway.confirm(out.approval_id, reviewer)
                 actions = [action_of("send_reply", out)]
+                if edited:
+                    actions[0]["edited_by_human"] = True
             if isinstance(out, Executed):
                 done = toolbox.resolve_ticket(reviewer, rid, tid)
                 actions.append(action_of("set_ticket_status", done))
-                return {"actions": actions, "status": "resolved" if isinstance(done, Executed) else "action_failed"}
-            return {"actions": actions, "status": "action_failed"}
+                return {"actions": actions, "status": "resolved" if isinstance(done, Executed) else "action_failed",
+                        **edit_metadata}
+            return {"actions": actions, "status": "action_failed", **edit_metadata}
         # 无法自动解决，或审核人驳回了草稿 → 升级
         teams = state.get("route_to") or route_escalation(state)["route_to"]
         reason = review.get("note") or state.get("escalate_reason") or "审核人驳回自动回复"
-        extra = f"；同时通知 {'、'.join(teams[1:])}" if len(teams) > 1 else ""
-        args = {"ticket_id": tid, "team": teams[0], "reason": reason[:400] + extra,
+        args = {"ticket_id": tid, "team": teams[0], "reason": reason[:500],
                 "actions_summary": build_actions_summary(state)}
         out = toolbox.propose_and_approve(reviewer, reviewer, rid, tid, "escalate_ticket", args)
         return {"actions": [action_of("escalate_ticket", out)], "status": "escalated" if isinstance(out, Executed) else "action_failed"}

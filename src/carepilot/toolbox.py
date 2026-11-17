@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth import Principal, Role
 from .gateway.gateway import ToolGateway
@@ -81,6 +81,13 @@ class StatusArgs(_Args):
 class SendArgs(_Args):
     ticket_id: str = Field(pattern=_TICKET_ID)
     text: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("text")
+    @classmethod
+    def reject_whitespace_only(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must not be blank")
+        return value
 
 
 class EscalateArgs(_Args):
@@ -250,19 +257,27 @@ class Toolbox:
                 raise RuleViolation("unknown_team", a.team)
 
         def escalate(ctx: ToolContext, a: EscalateArgs) -> dict[str, Any]:
-            p = ctx.principal
-            if store.get_ticket(p, a.ticket_id).status == "new":
-                store.transition(p, a.ticket_id, "open", reason="分诊后进入处理")
-            store.transition(p, a.ticket_id, "escalated", reason=a.reason)
-            store.add_message(a.ticket_id, author=p, kind="system", body=f"升级原因：{a.reason}（转交 {a.team}）",
-                              visibility="internal", idem_key=f"{ctx.idem_key}:reason")
-            store.add_message(a.ticket_id, author=p, kind="note", body=f"已完成动作：{a.actions_summary or '无'}",
-                              visibility="internal", idem_key=f"{ctx.idem_key}:actions")
+            store._record_escalation(ctx.principal, a.ticket_id, team=a.team, reason=a.reason,
+                                     actions_summary=a.actions_summary, idem_key=ctx.idem_key or "")
             return {"ticket_id": a.ticket_id, "status": "escalated", "team": a.team}
 
         def escalate_verify(ctx: ToolContext, a: EscalateArgs) -> dict[str, Any] | None:
             t = self._ticket_or_none(a.ticket_id)
-            return {"ticket_id": a.ticket_id, "status": "escalated", "team": a.team} if t and t.status == "escalated" else None
+            if t is None or t.status != "escalated":
+                return None
+            reason = store.find_message_by_idem_key(f"{ctx.idem_key}:reason")
+            actions = store.find_message_by_idem_key(f"{ctx.idem_key}:actions")
+            expected = (
+                (reason, "system", f"升级原因：{a.reason}（转交 {a.team}）"),
+                (actions, "note", f"已完成动作：{a.actions_summary or '无'}"),
+            )
+            if any(
+                msg is None or msg.ticket_id != a.ticket_id or msg.author_id != ctx.principal.user_id
+                or msg.kind != kind or msg.visibility != "internal" or msg.body != body
+                for msg, kind, body in expected
+            ):
+                return None
+            return {"ticket_id": a.ticket_id, "status": "escalated", "team": a.team}
 
         def followup_rule(ctx: ToolContext, a: FollowupArgs) -> None:
             if not a.question.startswith(FOLLOWUP_PREFIXES):
@@ -287,7 +302,7 @@ class Toolbox:
                                  owner_check=lambda ctx, a: self._ticket_or_none(a.ticket_id) is not None
                                  and can_view(ctx.principal, self._ticket_or_none(a.ticket_id)),
                                  summarize_args=lambda a: f"ticket={a.ticket_id}, kind={a.kind}, len={len(a.body)}, sha1={_digest(a.body)}"),
-            "post_followup": ToolSpec("post_followup", FollowupArgs, post_followup, Risk.WRITE_INTERNAL, frozenset({Role.ADMIN}),
+            "post_followup": ToolSpec("post_followup", FollowupArgs, post_followup, Risk.EXTERNAL_SEND, frozenset({Role.ADMIN}),
                                       rules=(followup_rule,), owner_check=lambda ctx, a: self._ticket_or_none(a.ticket_id) is not None,
                                       summarize_args=lambda a: f"ticket={a.ticket_id}, len={len(a.question)}"),
             "set_ticket_status": ToolSpec("set_ticket_status", StatusArgs, set_status, Risk.STATE_CHANGE, STAFF,

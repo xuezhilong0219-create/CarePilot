@@ -104,6 +104,19 @@ def test_duplicate_proposals_are_not_executed_twice(tmp_path):
     assert len(executed) == 1
 
 
+def test_distinct_shop_names_are_not_guarded_as_duplicate_calls(tmp_path):
+    world = build_world(7)
+    shops = [world.shops[shop_id] for shop_id in ("S1", "S2", "S3")]
+    plans = ScriptedInvoker([*(ToolPlan(tool="query_shop_auth", shop_name=shop.name) for shop in shops), ToolPlan(tool="none")])
+    graph, store, _, _ = build_env(tmp_path, plans)
+    message = "查询授权状态：" + "、".join(shop.name for shop in shops)
+    _, cfg = run(graph, store, message, guard=RunGuard(RunBudget(max_steps=100)))
+
+    values = graph.get_state(cfg).values
+
+    assert [call["outcome"] for call in values["tool_run"]["calls"]] == ["ok", "ok", "not_found"]
+
+
 def test_endless_identical_proposals_are_cut_off_as_a_loop(tmp_path):
     world = build_world(7)
     shipped, _ = orders(world)

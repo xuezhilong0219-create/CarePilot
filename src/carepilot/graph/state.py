@@ -98,6 +98,7 @@ class TicketState(TypedDict, total=False):
     citations: list[str]
     citation_details: list[dict]  # 结构化引用：文档名/章节/产品线/片段，供审核人点开核对
     pending_confirmation: dict  # 对外发送已批准、等待二次确认：{"approval_id", "tool"}
+    reply_edited: bool  # 回复已由坐席人工修改，原自动回复引用已清除
     resolution: Literal["auto_reply", "escalate", "need_info"]
     escalate_reason: str
     route_to: list[str]

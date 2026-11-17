@@ -118,6 +118,41 @@ def test_full_flow_query_review_two_step_confirm_and_idempotent_send(tmp_path):
         assert any(a["tool"] == "send_reply" and a["decision"] == "replayed" for a in audit)  # 重复确认在审计里是回放
 
 
+def test_edited_reply_is_marked_in_the_staff_view(tmp_path):
+    world = build_world(7)
+    mine = own_order(world)
+    app, *_ = build(tmp_path, DATA_EXC(), make_draft(cited_ids=["1"]),
+                    [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
+    with TestClient(app) as c:
+        ticket = c.post("/tickets", json={"message": f"查订单 {mine.order_id}"}, headers=H("c1")).json()
+        ticket_id = ticket["ticket"]["ticket_id"]
+
+        sent = c.post(f"/tickets/{ticket_id}/review", json={"action": "edit", "reply": "人工改写回复", "confirm": True},
+                      headers=H("a1"))
+        staff_view = c.get(f"/tickets/{ticket_id}", headers=H("a1")).json()
+
+        assert sent.json()["status"] == "resolved"
+        assert staff_view["reply_edited"] is True
+        assert staff_view["actions"][0]["edited_by_human"] is True
+
+
+def test_edit_rejects_whitespace_only_reply_without_sending(tmp_path):
+    world = build_world(7)
+    mine = own_order(world)
+    app, *_ = build(tmp_path, DATA_EXC(), make_draft(cited_ids=["1"]),
+                    [ToolPlan(tool="query_order", order_id=mine.order_id), ToolPlan(tool="none")])
+    with TestClient(app) as c:
+        ticket = c.post("/tickets", json={"message": f"查订单 {mine.order_id}"}, headers=H("c1")).json()
+        ticket_id = ticket["ticket"]["ticket_id"]
+        before = c.get(f"/tickets/{ticket_id}", headers=H("c1")).json()["messages"]
+
+        rejected = c.post(f"/tickets/{ticket_id}/review", json={"action": "edit", "reply": " \t ", "confirm": True},
+                          headers=H("a1"))
+
+        assert rejected.status_code == 422
+        assert c.get(f"/tickets/{ticket_id}", headers=H("c1")).json()["messages"] == before
+
+
 def test_other_agents_cannot_review_or_confirm_a_ticket_owned_by_someone_else(tmp_path):
     app, *_ = build(tmp_path, DATA_EXC(), make_draft(), ToolPlan(tool="none"))
     with TestClient(app) as c:
@@ -206,9 +241,25 @@ def test_message_validation_and_closed_tickets(tmp_path):
     app, world, store, tb, _ = build(tmp_path, make_triage(), make_draft())
     with TestClient(app) as c:
         assert c.post("/tickets", json={"message": ""}, headers=H("c1")).status_code == 422
+        assert c.post("/tickets", json={"message": " \t "}, headers=H("c1")).status_code == 422
         assert c.post("/tickets", json={"message": "x" * 2001}, headers=H("c1")).status_code == 422
         assert c.post("/tickets", json={"message": "hi", "shop_id": "S3"}, headers=H("c1")).status_code == 403  # 不是他的店铺
         assert c.post("/tickets", json={"message": "hi"}, headers=H("a1")).status_code == 403  # 只有客户能开单
+
+
+def test_add_message_rejects_whitespace_only(tmp_path):
+    vague = make_triage(is_vague=True)
+    app, *_ = build(tmp_path, [vague, vague], draft=None)
+    with TestClient(app) as c:
+        created = c.post("/tickets", json={"message": "hi"}, headers=H("c1"))
+        assert created.status_code == 200
+        ticket_id = created.json()["ticket"]["ticket_id"]
+        messages_before = c.get(f"/tickets/{ticket_id}", headers=H("c1")).json()["messages"]
+
+        rejected = c.post(f"/tickets/{ticket_id}/messages", json={"message": " \t "}, headers=H("c1"))
+
+        assert rejected.status_code == 422
+        assert c.get(f"/tickets/{ticket_id}", headers=H("c1")).json()["messages"] == messages_before
 
 
 def leave_orphan(tb, *, tool="query_order", key="orphan-key", args=None):

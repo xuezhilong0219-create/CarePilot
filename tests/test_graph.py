@@ -201,7 +201,7 @@ def test_7_citation_validation(make_env):
     assert _interrupts(snap)
 
 
-def test_8_critical_adds_oncall_to_routing(make_env):
+def test_8_critical_routes_to_the_primary_team_only(make_env):
     env = make_env(
         make_triage(category="platform_integration", severity="critical", platform_name="淘宝", shop_name="小熊数码"),
         make_draft(answerable=False),
@@ -210,12 +210,12 @@ def test_8_critical_adds_oncall_to_routing(make_env):
     env.graph.invoke(INITIAL, CFG)
 
     snap = _state(env)
-    assert snap.values["route_to"] == ["platform_integration_team", "oncall"]
+    assert snap.values["route_to"] == ["platform_integration_team"]
 
     _resume(env, {"action": "approve"})
     snap = _state(env)
     assert snap.values["status"] == "escalated"
-    assert [e["team"] for e in env.system.escalations] == ["platform_integration_team", "oncall"]
+    assert [e["team"] for e in env.system.escalations] == ["platform_integration_team"]
 
 
 def test_9_shop_auth_needs_both_names(make_env):
