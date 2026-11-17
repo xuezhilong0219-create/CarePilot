@@ -38,6 +38,8 @@ pythonpath = ["src"]
 [tool.ruff]
 target-version = "py311"
 line-length = 120
+# 仓库根的临时目录（.tmp*/）是随手放的东西，不是代码，别进 lint 队列
+exclude = [".tmp*"]
 
 [tool.ruff.lint]
 # 只开「可能真有 bug」的规则，不开纯风格规则：
